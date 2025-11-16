@@ -1,0 +1,22 @@
+{
+  "wall": "⬛",
+  "obstacle": "🟥",
+  "empty": "🟦",
+  "player": "🟢",
+  "portal": "🛠️",
+  "zombie": "🧟",
+  "diamond": "💎",
+  "wood": "🪵",
+  "stone": "🪨",
+  "coal": "⚫",
+  "up": "⬆️",
+  "down": "⬇️",
+  "left": "⬅️",
+  "right": "➡️",
+  "heart": "❤️",
+  "skull": "💀",
+  "field_width": 10,
+  "field_height": 5,
+  "player_lives": 3
+}
+
