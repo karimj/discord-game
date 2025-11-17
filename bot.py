@@ -657,19 +657,15 @@ class CategoryView(discord.ui.View):
         current_settings = self.config_manager.get_game_settings(self.guild_id)
         view = discord.ui.View(timeout=300)  # Plain view, no category buttons
         
-        view.add_item(create_setting_button("field_width", "Field Width", current_settings.get("field_width", 10), self.config_manager, self.guild_id, min_value=5, max_value=50, row=0))
-        view.add_item(create_setting_button("field_height", "Field Height", current_settings.get("field_height", 5), self.config_manager, self.guild_id, min_value=3, max_value=30, row=0))
-        view.add_item(create_setting_button("player_lives", "Player Lives", current_settings.get("player_lives", 3), self.config_manager, self.guild_id, min_value=1, max_value=10, row=1))
+        view.add_item(create_setting_button("player_lives", "Player Lives", current_settings.get("player_lives", 3), self.config_manager, self.guild_id, min_value=1, max_value=10, row=0))
         
         embed = discord.Embed(
             title="Configure Game Settings",
             description="Click a button to set the value for that setting.",
             color=discord.Color.red()
         )
-        embed.add_field(name="Field Width", value=f"Current: {current_settings.get('field_width', 10)}", inline=True)
-        embed.add_field(name="Field Height", value=f"Current: {current_settings.get('field_height', 5)}", inline=True)
         embed.add_field(name="Player Lives", value=f"Current: {current_settings.get('player_lives', 3)}", inline=True)
-        embed.set_footer(text="Note: Field size affects level 1. Higher levels use their own sizes.")
+        embed.set_footer(text="Note: Field size is automatically capped based on emoji length to prevent message size limits.")
         
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     
@@ -708,9 +704,7 @@ class CategoryView(discord.ui.View):
         embed.add_field(name="Movement", value=movement_text, inline=False)
         
         # Game Settings
-        settings_text = f"**Field Width**: {current_settings.get('field_width', 10)}\n"
-        settings_text += f"**Field Height**: {current_settings.get('field_height', 5)}\n"
-        settings_text += f"**Player Lives**: {current_settings.get('player_lives', 3)}"
+        settings_text = f"**Player Lives**: {current_settings.get('player_lives', 3)}"
         embed.add_field(name="Game Settings", value=settings_text, inline=False)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -753,7 +747,7 @@ async def configure_command(interaction: discord.Interaction):
         value="• **Field Objects**: Wall, Obstacle, Empty, Player, Portal, Zombie, Heart, Skull\n"
               "• **Items**: Diamond, Wood, Stone, Coal\n"
               "• **Movement**: Up, Down, Left, Right\n"
-              "• **Game Settings**: Field Width, Field Height, Player Lives",
+              "• **Game Settings**: Player Lives",
         inline=False
     )
     embed.set_footer(text="Changes are saved automatically and persist across bot restarts.")

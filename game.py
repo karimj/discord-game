@@ -3,8 +3,6 @@
 import random
 from typing import Tuple, Set, Dict, Optional, List
 from config import (
-    FIELD_WIDTH,
-    FIELD_HEIGHT,
     OBSTACLE_COUNT,
     EMOJI_WALL,
     EMOJI_OBSTACLE,
@@ -60,6 +58,35 @@ class Game:
             min_items, max_items, width, height, obstacle_count = LEVEL_CONFIGS[level]
         else:
             min_items, max_items, width, height, obstacle_count = DEFAULT_LEVEL_CONFIG
+        
+        # Dynamically cap field size based on emoji length to prevent exceeding Discord's 4096 char limit
+        # Estimate average emoji length (custom emojis are ~22 chars, Unicode are ~2 chars)
+        avg_emoji_length = 2  # Default to Unicode
+        emoji_lengths = [len(e) for e in self.emojis.values()]
+        emoji_lengths.extend([len(e) for e in self.item_types.values()])
+        if emoji_lengths:
+            avg_emoji_length = sum(emoji_lengths) / len(emoji_lengths)
+        
+        # Calculate max safe field size
+        # Formula: (width + 2) * (height + 2) * avg_emoji_length + (height + 2) newlines < 4000
+        # Leave ~500 chars for other embed content (title, fields, etc.)
+        MAX_SAFE_LENGTH = 3500
+        max_cells = int(MAX_SAFE_LENGTH / avg_emoji_length)
+        
+        # Calculate max dimensions (accounting for walls: width+2, height+2)
+        # Approximate: (width+2) * (height+2) <= max_cells
+        # For square-ish fields: max_dimension ≈ sqrt(max_cells) - 2
+        max_dimension = int((max_cells ** 0.5) - 2)
+        
+        # Cap width and height if they exceed the limit
+        if width > max_dimension:
+            width = max_dimension
+        if height > max_dimension:
+            height = max_dimension
+        
+        # Ensure minimum size
+        width = max(5, width)
+        height = max(3, height)
         
         self.width = width
         self.height = height

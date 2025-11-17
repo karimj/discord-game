@@ -5,10 +5,6 @@ Server admins can override emojis and some game settings using the /configure co
 which saves to configs/{guild_id}.json. Custom emojis should be configured per-server.
 """
 
-# Field dimensions (width x height) - DEFAULT values, can be overridden per-server
-FIELD_WIDTH = 10
-FIELD_HEIGHT = 5
-
 # Number of obstacles to place randomly (few obstacles)
 OBSTACLE_COUNT = 3
 

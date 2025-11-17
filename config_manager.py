@@ -21,8 +21,6 @@ from config import (
     EMOJI_HEART,
     EMOJI_SKULL,
     ITEM_TYPES,
-    FIELD_WIDTH,
-    FIELD_HEIGHT,
     PLAYER_LIVES,
 )
 
@@ -66,8 +64,6 @@ class ConfigManager:
         """Get default configuration including emojis and game settings."""
         config = self.get_default_emojis()
         config.update({
-            "field_width": FIELD_WIDTH,
-            "field_height": FIELD_HEIGHT,
             "player_lives": PLAYER_LIVES,
         })
         return config
@@ -112,11 +108,9 @@ class ConfigManager:
         return {k: config.get(k, "") for k in emoji_keys if k in config}
     
     def get_game_settings(self, guild_id: int) -> Dict[str, int]:
-        """Get game settings (field_width, field_height, player_lives) for a server."""
+        """Get game settings (player_lives) for a server."""
         config = self.load_config(guild_id)
         return {
-            "field_width": int(config.get("field_width", FIELD_WIDTH)),
-            "field_height": int(config.get("field_height", FIELD_HEIGHT)),
             "player_lives": int(config.get("player_lives", PLAYER_LIVES)),
         }
     
@@ -127,7 +121,7 @@ class ConfigManager:
         return self.save_config(guild_id, config)
     
     def update_setting(self, guild_id: int, setting_key: str, setting_value) -> bool:
-        """Update a game setting (field_width, field_height, player_lives) for a server."""
+        """Update a game setting (player_lives) for a server."""
         config = self.load_config(guild_id)
         config[setting_key] = setting_value
         return self.save_config(guild_id, config)

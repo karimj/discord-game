@@ -65,6 +65,8 @@ pip install -r requirements.txt
 
 ### 5. Run the Bot
 
+#### Running Locally (Development)
+
 ```bash
 python bot.py
 ```
@@ -77,6 +79,121 @@ Synced 2 command(s)
 ```
 
 Note: The bot will automatically load server configurations on startup.
+
+#### Running on a Server (Background Service)
+
+For production servers, you'll want to run the bot as a background service so it stays running even after you disconnect. Here are several options:
+
+##### Option 1: Using systemd (Recommended for Linux)
+
+1. Create a systemd service file:
+   ```bash
+   sudo nano /etc/systemd/system/discord-game-bot.service
+   ```
+
+2. Add the following content (adjust paths as needed):
+   ```ini
+   [Unit]
+   Description=Discord Game Bot
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=your-username
+   WorkingDirectory=/path/to/discord-game
+   Environment="PATH=/usr/bin:/usr/local/bin"
+   ExecStart=/usr/bin/python3 /path/to/discord-game/bot.py
+   Restart=always
+   RestartSec=10
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+3. Enable and start the service:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable discord-game-bot.service
+   sudo systemctl start discord-game-bot.service
+   ```
+
+4. Check status:
+   ```bash
+   sudo systemctl status discord-game-bot.service
+   ```
+
+5. View logs:
+   ```bash
+   sudo journalctl -u discord-game-bot.service -f
+   ```
+
+##### Option 2: Using screen
+
+1. Install screen (if not already installed):
+   ```bash
+   sudo apt-get install screen  # Debian/Ubuntu
+   # or
+   sudo yum install screen      # CentOS/RHEL
+   ```
+
+2. Start a screen session and run the bot:
+   ```bash
+   screen -S discord-bot
+   python bot.py
+   ```
+
+3. Detach from screen: Press `Ctrl+A` then `D`
+
+4. Reattach later:
+   ```bash
+   screen -r discord-bot
+   ```
+
+##### Option 3: Using tmux
+
+1. Install tmux (if not already installed):
+   ```bash
+   sudo apt-get install tmux  # Debian/Ubuntu
+   # or
+   sudo yum install tmux      # CentOS/RHEL
+   ```
+
+2. Start a tmux session and run the bot:
+   ```bash
+   tmux new -s discord-bot
+   python bot.py
+   ```
+
+3. Detach from tmux: Press `Ctrl+B` then `D`
+
+4. Reattach later:
+   ```bash
+   tmux attach -t discord-bot
+   ```
+
+##### Option 4: Using nohup
+
+1. Run the bot with nohup:
+   ```bash
+   nohup python bot.py > bot.log 2>&1 &
+   ```
+
+2. Check if it's running:
+   ```bash
+   ps aux | grep bot.py
+   ```
+
+3. View logs:
+   ```bash
+   tail -f bot.log
+   ```
+
+4. Stop the bot:
+   ```bash
+   pkill -f bot.py
+   ```
+
+**Note:** For production use, systemd (Option 1) is recommended as it provides automatic restart on failure and better process management.
 
 ## How to Play
 
