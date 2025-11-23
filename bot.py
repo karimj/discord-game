@@ -6,6 +6,7 @@ import discord
 from discord.ext import commands
 from discord import utils
 from dotenv import load_dotenv
+from typing import Optional
 from game import Game
 from config_manager import ConfigManager
 
@@ -25,10 +26,13 @@ config_manager = ConfigManager()
 # Store active games: {message_id: Game}
 active_games: dict[int, Game] = {}
 
-# Store user to message mapping: {user_id: message_id}
-user_games: dict[int, int] = {}
+# Store game players: {message_id: set of user_ids}
+game_players: dict[int, set[int]] = {}
 
-# Store user levels: {user_id: level}
+# Store game owners: {message_id: user_id} (who created the game)
+game_owners: dict[int, int] = {}
+
+# Store user levels: {user_id: level} (for tracking level progression)
 user_levels: dict[int, int] = {}
 
 # Store server configs in memory: {guild_id: emoji_config}
@@ -61,8 +65,8 @@ async def on_guild_join(guild: discord.Guild):
     print(f"Loaded config for new server: {guild.name} ({guild.id})")
 
 
-def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None, item_types: dict = None) -> discord.Embed:
-    """Create a game embed with field, inventory, and level info."""
+def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None, item_types: dict = None, user_id: Optional[int] = None) -> discord.Embed:
+    """Create a game embed with field, inventory, and level info for all players."""
     # Check if using custom emojis (they don't render in code blocks)
     field_render = game.render()
     if emojis is None:
@@ -121,10 +125,10 @@ def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None,
     )
     
     # Add game over message if applicable
-    if game.game_over:
+    if game.game_over and game.winner is None:
         embed.add_field(
             name=f"{skull_emoji} Game Over",
-            value="You ran out of lives! Use `/play` to start a new game.",
+            value="All players ran out of lives! Use `/play` to start a new game.",
             inline=False
         )
     
@@ -135,48 +139,56 @@ def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None,
         inline=True
     )
     
-    # Add lives info
-    lives_emoji = heart_emoji * game.player_lives if game.player_lives > 0 else skull_emoji
-    embed.add_field(
-        name="Lives",
-        value=f"{lives_emoji} {game.player_lives}",
-        inline=True
-    )
-    
-    # Add progress info
-    total_collected = game.get_total_collected()
-    progress = f"{total_collected}/{game.required_items_count}"
-    embed.add_field(
-        name="Progress",
-        value=progress,
-        inline=True
-    )
-    
-    # Add inventory
-    inventory = game.get_inventory()
-    inventory_text = ""
-    for item_type, count in inventory.items():
-        if count > 0:
-            emoji = item_types.get(item_type, "❓") if item_types else "❓"
-            inventory_text += f"{emoji} {item_type.capitalize()}: {count}\n"
-    
-    if inventory_text:
+    # Add players info
+    if game.player_positions:
+        players_text = ""
+        for player_id in game.players:
+            player_emoji = game.get_player_emoji(player_id)
+            lives = game.player_lives.get(player_id, 0)
+            lives_display = heart_emoji * lives if lives > 0 else skull_emoji
+            total_collected = game.get_total_collected(player_id)
+            progress = f"{total_collected}/{game.required_items_count}"
+            wins = game.get_player_wins(player_id)
+            win_text = f", {wins} win{'s' if wins != 1 else ''}" if wins > 0 else ""
+            players_text += f"{player_emoji} Player: {lives_display} {lives} lives, {progress} items{win_text}\n"
+        
         embed.add_field(
-            name="Inventory",
-            value=inventory_text.strip(),
+            name="Players",
+            value=players_text.strip(),
+            inline=False
+        )
+    
+    # Add inventories for all players
+    inventories_text = ""
+    for player_id in game.players:
+        player_emoji = game.get_player_emoji(player_id)
+        inventory = game.get_inventory(player_id)
+        if inventory:
+            inv_items = []
+            for item_type, count in inventory.items():
+                if count > 0:
+                    emoji = item_types.get(item_type, "❓") if item_types else "❓"
+                    inv_items.append(f"{emoji} {item_type.capitalize()}: {count}")
+            if inv_items:
+                inventories_text += f"{player_emoji} {' | '.join(inv_items)}\n"
+    
+    if inventories_text:
+        embed.add_field(
+            name="Inventories",
+            value=inventories_text.strip(),
             inline=False
         )
     else:
         embed.add_field(
-            name="Inventory",
-            value="Empty",
+            name="Inventories",
+            value="All empty",
             inline=False
         )
     
     if game.game_over:
         embed.set_footer(text="Game Over - Use /play to restart!")
     else:
-        embed.set_footer(text="Click the arrows below to move!")
+        embed.set_footer(text="Click ✅ to join, then use arrows to move!")
     
     return embed
 
@@ -188,11 +200,17 @@ async def play_command(interaction: discord.Interaction):
     guild_id = interaction.guild.id if interaction.guild else None
     
     # If user already has an active game, end it first
-    if user_id in user_games:
-        old_message_id = user_games[user_id]
-        if old_message_id in active_games:
-            del active_games[old_message_id]
-        del user_games[user_id]
+    for message_id, players in list(game_players.items()):
+        if user_id in players:
+            # Remove user from that game
+            players.discard(user_id)
+            # If no players left, clean up the game
+            if not players:
+                if message_id in active_games:
+                    del active_games[message_id]
+                if message_id in game_owners:
+                    del game_owners[message_id]
+                del game_players[message_id]
     
     # Reset level to 1 for new game
     user_levels[user_id] = 1
@@ -220,8 +238,12 @@ async def play_command(interaction: discord.Interaction):
     # Get player lives from server settings
     player_lives = game_settings.get("player_lives", 3)
     
+    # Get player emojis for this server
+    player_emojis = config_manager.get_player_emojis(guild_id) if guild_id else config_manager.get_player_emojis(0)
+    
     # Create new game at level 1 with server-specific emojis and settings
-    game = Game(level=1, player_lives=player_lives, emojis=game_emojis, item_types=item_types)
+    # Pass first_player_id to add the creator as the first player
+    game = Game(level=1, player_lives=player_lives, emojis=game_emojis, item_types=item_types, first_player_id=user_id, player_emojis=player_emojis)
     
     # Create embed
     embed = create_game_embed(game, "🎮 Game Started!", emojis=server_emojis, item_types=item_types)
@@ -230,19 +252,23 @@ async def play_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
     message = await interaction.original_response()
     
-    # Add reaction emojis
+    # Add join reaction first, then movement reactions
+    join_emoji = server_emojis.get("join", "✅")
+    await message.add_reaction(join_emoji)
+    
     movement_emojis = [server_emojis["up"], server_emojis["down"], server_emojis["left"], server_emojis["right"]]
     for emoji in movement_emojis:
         await message.add_reaction(emoji)
     
     # Store game state
     active_games[message.id] = game
-    user_games[user_id] = message.id
+    game_players[message.id] = {user_id}  # Creator is automatically joined
+    game_owners[message.id] = user_id
 
 
 @bot.event
 async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
-    """Handle reaction additions for movement."""
+    """Handle reaction additions for joining and movement."""
     # Ignore bot's own reactions
     if user.bot:
         return
@@ -252,34 +278,93 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
     if message_id not in active_games:
         return
     
-    # Check if this is the game owner
     game = active_games[message_id]
-    if user.id not in user_games or user_games[user.id] != message_id:
-        return
     
     # Get guild ID for server-specific emojis
     guild_id = reaction.message.guild.id if reaction.message.guild else None
     
-    # Get emoji to direction mapping for this server
+    # Get server emojis
     if guild_id and guild_id in server_configs:
-        emoji_to_direction = config_manager.get_emoji_to_direction(guild_id)
-        server_emojis = server_configs[guild_id]
+        server_emojis = config_manager.get_emojis(guild_id)
         item_types = config_manager.get_item_types(guild_id)
+        emoji_to_direction = config_manager.get_emoji_to_direction(guild_id)
     else:
-        emoji_to_direction = config_manager.get_emoji_to_direction(0)  # Use defaults
         server_emojis = config_manager.get_default_emojis()
         item_types = config_manager.get_default_item_types()
-    
-    # Get direction from emoji
-    # Handle both Unicode and custom emojis
-    # str(reaction.emoji) returns Unicode for standard emojis or "<:name:id>" for custom emojis
-    emoji_str = str(reaction.emoji)
-    
-    if emoji_str not in emoji_to_direction:
-        return
+        emoji_to_direction = config_manager.get_emoji_to_direction(0)  # Use defaults
     
     # Get UI emojis
     skull_emoji = server_emojis.get("skull", "💀")
+    join_emoji = server_emojis.get("join", "✅")
+    
+    # Handle both Unicode and custom emojis
+    emoji_str = str(reaction.emoji)
+    
+    # Check if this is a join reaction
+    if emoji_str == join_emoji:
+        # Check if user is already in the game
+        user_in_game = message_id in game_players and user.id in game_players[message_id]
+        
+        if user_in_game:
+            # User already joined, remove reaction
+            try:
+                await reaction.message.remove_reaction(reaction.emoji, user)
+            except discord.errors.Forbidden:
+                pass
+            return
+        
+        # Check if game is over
+        if game.game_over:
+            try:
+                await reaction.message.remove_reaction(reaction.emoji, user)
+            except discord.errors.Forbidden:
+                pass
+            return
+        
+        # Get player lives from server settings
+        game_settings = config_manager.get_game_settings(guild_id) if guild_id else config_manager.get_game_settings(0)
+        player_lives = game_settings.get("player_lives", 3)
+        
+        # Add player to game
+        if game.add_player(user.id, player_lives):
+            # Add to game_players tracking
+            if message_id not in game_players:
+                game_players[message_id] = set()
+            game_players[message_id].add(user.id)
+            
+            # Get player emoji
+            player_emoji = game.get_player_emoji(user.id)
+            
+            # Create join message embed
+            embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types)
+            embed.add_field(
+                name="Player Joined",
+                value=f"{player_emoji} {user.display_name} joined the game!",
+                inline=False
+            )
+            await reaction.message.edit(embed=embed)
+            
+            # Remove user's reaction
+            try:
+                await reaction.message.remove_reaction(reaction.emoji, user)
+            except discord.errors.Forbidden:
+                pass
+        return
+    
+    # Check if this is a movement reaction
+    if emoji_str not in emoji_to_direction:
+        return  # Not a movement emoji, ignore
+    
+    # Check if user is in the game (must join first)
+    user_in_game = message_id in game_players and user.id in game_players[message_id]
+    
+    if not user_in_game:
+        # User hasn't joined yet, remove reaction and ignore
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except discord.errors.Forbidden:
+            pass
+        return
     
     # Check if game is over
     if game.game_over:
@@ -295,10 +380,56 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
     
     direction = emoji_to_direction[emoji_str]
     
-    # Try to move
-    moved = game.move(direction[0], direction[1])
+    # Try to move the specific player
+    moved = game.move(user.id, direction[0], direction[1])
     
-    # Check if game over after move (collision might have occurred)
+    # Check if level completed (player won)
+    if game.is_level_complete() and game.winner is not None:
+        # Winner announcement
+        winner_user_id = game.winner
+        try:
+            winner_user = await bot.fetch_user(winner_user_id)
+            winner_name = winner_user.display_name
+        except:
+            winner_name = f"User {winner_user_id}"
+        
+        winner_emoji = game.get_player_emoji(winner_user_id)
+        winner_wins = game.get_player_wins(winner_user_id)
+        
+        # Show completion message
+        embed = create_game_embed(game, f"🎉 Level {game.level} Complete!", emojis=server_emojis, item_types=item_types)
+        embed.color = discord.Color.gold()
+        embed.add_field(
+            name="Winner",
+            value=f"{winner_emoji} **{winner_name}** won Level {game.level}! (Total wins: {winner_wins})",
+            inline=False
+        )
+        embed.add_field(
+            name="Next Level",
+            value=f"Advancing to Level {game.level + 1}...",
+            inline=False
+        )
+        await reaction.message.edit(embed=embed)
+        
+        # Wait a moment before advancing
+        await asyncio.sleep(2)
+        
+        # Create new game for next level, preserving player data
+        new_game = Game.create_next_level(game)
+        active_games[message_id] = new_game
+        
+        # Update embed for new level
+        new_embed = create_game_embed(new_game, f"🎮 Level {new_game.level}", emojis=server_emojis, item_types=item_types)
+        await reaction.message.edit(embed=new_embed)
+        
+        # Remove user's reaction
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except discord.errors.Forbidden:
+            pass
+        return
+    
+    # Check if game over (all players lost)
     if game.game_over:
         embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types)
         await reaction.message.edit(embed=embed)
@@ -309,55 +440,9 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
             pass
         return
     
-    # Check if level is complete
-    if game.is_level_complete():
-        # Level completed!
-        current_level = game.level
-        next_level = current_level + 1
-        
-        # Create completion embed
-        embed = create_game_embed(game, f"🎉 Level {current_level} Complete!", emojis=server_emojis, item_types=item_types)
-        embed.color = discord.Color.gold()
-        embed.add_field(
-            name="Status",
-            value=f"✅ You collected {game.get_total_collected()} items and reached the portal!",
-            inline=False
-        )
-        
-        # Create emoji dict for new Game instance
-        game_emojis = {
-            "wall": server_emojis["wall"],
-            "obstacle": server_emojis["obstacle"],
-            "empty": server_emojis["empty"],
-            "player": server_emojis["player"],
-            "portal": server_emojis["portal"],
-            "zombie": server_emojis["zombie"],
-        }
-        
-        # Advance to next level (preserve lives from current game)
-        user_levels[user.id] = next_level
-        new_game = Game(level=next_level, player_lives=game.player_lives, emojis=game_emojis, item_types=item_types)
-        active_games[message_id] = new_game
-        
-        # Add next level info
-        embed.add_field(
-            name="Next Level",
-            value=f"Starting Level {next_level}!",
-            inline=False
-        )
-        
-        await reaction.message.edit(embed=embed)
-        
-        # Wait a moment, then update to new level
-        await asyncio.sleep(2)
-        
-        # Create new level embed
-        new_embed = create_game_embed(new_game, f"🎮 Level {next_level}", emojis=server_emojis, item_types=item_types)
-        await reaction.message.edit(embed=new_embed)
-    else:
-        # Update embed with current game state
-        embed = create_game_embed(game, emojis=server_emojis, item_types=item_types)
-        await reaction.message.edit(embed=embed)
+    # Update embed with current game state
+    embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types)
+    await reaction.message.edit(embed=embed)
     
     # Remove user's reaction to allow repeated moves
     try:
@@ -627,6 +712,29 @@ class CategoryView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     
+    @discord.ui.button(label="Player Emojis", style=discord.ButtonStyle.secondary, row=0)
+    async def player_emojis_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show player emoji configuration."""
+        # Reload emojis to get latest values
+        current_emojis = self.config_manager.get_emojis(self.guild_id)
+        view = discord.ui.View(timeout=300)  # Plain view, no category buttons
+        
+        view.add_item(create_emoji_button("player1", "Player 1", current_emojis.get("player1", "❓"), self.config_manager, self.guild_id, 0))
+        view.add_item(create_emoji_button("player2", "Player 2", current_emojis.get("player2", "❓"), self.config_manager, self.guild_id, 0))
+        view.add_item(create_emoji_button("player3", "Player 3", current_emojis.get("player3", "❓"), self.config_manager, self.guild_id, 1))
+        view.add_item(create_emoji_button("player4", "Player 4", current_emojis.get("player4", "❓"), self.config_manager, self.guild_id, 1))
+        
+        embed = discord.Embed(
+            title="Configure Player Emojis",
+            description="Click a button to set the emoji for that player position. These emojis are assigned to players 1-4 based on join order.",
+            color=discord.Color.purple()
+        )
+        for key in ["player1", "player2", "player3", "player4"]:
+            current = current_emojis.get(key, "❓")
+            embed.add_field(name=key.capitalize().replace("player", "Player "), value=f"Current: {current}", inline=True)
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
     @discord.ui.button(label="Movement", style=discord.ButtonStyle.secondary, row=0)
     async def movement_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Show movement emoji configuration."""
@@ -634,17 +742,18 @@ class CategoryView(discord.ui.View):
         current_emojis = self.config_manager.get_emojis(self.guild_id)
         view = discord.ui.View(timeout=300)  # Plain view, no category buttons
         
+        view.add_item(create_emoji_button("join", "Join", current_emojis.get("join", "❓"), self.config_manager, self.guild_id, 0))
         view.add_item(create_emoji_button("up", "Up", current_emojis.get("up", "❓"), self.config_manager, self.guild_id, 0))
-        view.add_item(create_emoji_button("down", "Down", current_emojis.get("down", "❓"), self.config_manager, self.guild_id, 0))
+        view.add_item(create_emoji_button("down", "Down", current_emojis.get("down", "❓"), self.config_manager, self.guild_id, 1))
         view.add_item(create_emoji_button("left", "Left", current_emojis.get("left", "❓"), self.config_manager, self.guild_id, 1))
-        view.add_item(create_emoji_button("right", "Right", current_emojis.get("right", "❓"), self.config_manager, self.guild_id, 1))
+        view.add_item(create_emoji_button("right", "Right", current_emojis.get("right", "❓"), self.config_manager, self.guild_id, 2))
         
         embed = discord.Embed(
-            title="Configure Movement Emojis",
-            description="Click a button to set the emoji for that direction.",
+            title="Configure Movement & Join Emojis",
+            description="Click a button to set the emoji for that action.",
             color=discord.Color.orange()
         )
-        for key in ["up", "down", "left", "right"]:
+        for key in ["join", "up", "down", "left", "right"]:
             current = current_emojis.get(key, "❓")
             embed.add_field(name=key.capitalize(), value=f"Current: {current}", inline=True)
         
@@ -696,12 +805,19 @@ class CategoryView(discord.ui.View):
         ])
         embed.add_field(name="Items", value=items_text, inline=False)
         
+        # Player Emojis
+        player_text = "\n".join([
+            f"**{key.capitalize().replace('player', 'Player ')}**: {current_emojis.get(key, '❓')}"
+            for key in ["player1", "player2", "player3", "player4"]
+        ])
+        embed.add_field(name="Player Emojis", value=player_text, inline=False)
+        
         # Movement
         movement_text = "\n".join([
             f"**{key.capitalize()}**: {current_emojis.get(key, '❓')}"
-            for key in ["up", "down", "left", "right"]
+            for key in ["join", "up", "down", "left", "right"]
         ])
-        embed.add_field(name="Movement", value=movement_text, inline=False)
+        embed.add_field(name="Movement & Join", value=movement_text, inline=False)
         
         # Game Settings
         settings_text = f"**Player Lives**: {current_settings.get('player_lives', 3)}"
@@ -746,7 +862,8 @@ async def configure_command(interaction: discord.Interaction):
         name="Categories",
         value="• **Field Objects**: Wall, Obstacle, Empty, Player, Portal, Zombie, Heart, Skull\n"
               "• **Items**: Diamond, Wood, Stone, Coal\n"
-              "• **Movement**: Up, Down, Left, Right\n"
+              "• **Player Emojis**: Player 1, Player 2, Player 3, Player 4\n"
+              "• **Movement**: Join, Up, Down, Left, Right\n"
               "• **Game Settings**: Player Lives",
         inline=False
     )

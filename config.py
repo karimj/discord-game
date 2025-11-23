@@ -74,6 +74,15 @@ LEVEL_CONFIGS = {
 # Default level (if level exceeds LEVEL_CONFIGS)
 DEFAULT_LEVEL_CONFIG = (7, 8, 18, 10, 7)
 
+# Join reaction emoji - DEFAULT value, can be overridden per-server
+EMOJI_JOIN = "✅"
+
+# Player emojis for multiplayer (up to 4 players) - DEFAULT values, can be overridden per-server
+EMOJI_PLAYER1 = "🟢"
+EMOJI_PLAYER2 = "🔵"
+EMOJI_PLAYER3 = "🟡"
+EMOJI_PLAYER4 = "🟣"
+
 # Movement reaction emojis - DEFAULT values, can be overridden per-server
 # Custom emojis work great for reactions!
 EMOJI_UP = "⬆️"

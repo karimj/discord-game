@@ -2,7 +2,7 @@
 
 import os
 import json
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from config import (
     EMOJI_WALL,
     EMOJI_OBSTACLE,
@@ -14,6 +14,11 @@ from config import (
     EMOJI_WOOD,
     EMOJI_STONE,
     EMOJI_COAL,
+    EMOJI_JOIN,
+    EMOJI_PLAYER1,
+    EMOJI_PLAYER2,
+    EMOJI_PLAYER3,
+    EMOJI_PLAYER4,
     EMOJI_UP,
     EMOJI_DOWN,
     EMOJI_LEFT,
@@ -48,6 +53,11 @@ class ConfigManager:
             "wood": EMOJI_WOOD,
             "stone": EMOJI_STONE,
             "coal": EMOJI_COAL,
+            "join": EMOJI_JOIN,
+            "player1": EMOJI_PLAYER1,
+            "player2": EMOJI_PLAYER2,
+            "player3": EMOJI_PLAYER3,
+            "player4": EMOJI_PLAYER4,
             "up": EMOJI_UP,
             "down": EMOJI_DOWN,
             "left": EMOJI_LEFT,
@@ -103,9 +113,20 @@ class ConfigManager:
         config = self.load_config(guild_id)
         # Return only emoji keys
         emoji_keys = ["wall", "obstacle", "empty", "player", "portal", "zombie", 
-                      "diamond", "wood", "stone", "coal", "up", "down", "left", "right",
-                      "heart", "skull"]
+                      "diamond", "wood", "stone", "coal", "join", 
+                      "player1", "player2", "player3", "player4",
+                      "up", "down", "left", "right", "heart", "skull"]
         return {k: config.get(k, "") for k in emoji_keys if k in config}
+    
+    def get_player_emojis(self, guild_id: int) -> List[str]:
+        """Get player emojis list for a server."""
+        emojis = self.get_emojis(guild_id)
+        return [
+            emojis.get("player1", EMOJI_PLAYER1),
+            emojis.get("player2", EMOJI_PLAYER2),
+            emojis.get("player3", EMOJI_PLAYER3),
+            emojis.get("player4", EMOJI_PLAYER4),
+        ]
     
     def get_game_settings(self, guild_id: int) -> Dict[str, int]:
         """Get game settings (player_lives) for a server."""
