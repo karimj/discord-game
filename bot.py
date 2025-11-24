@@ -2,6 +2,7 @@
 
 import os
 import asyncio
+import logging
 import discord
 from discord.ext import commands
 from discord import utils
@@ -9,6 +10,13 @@ from dotenv import load_dotenv
 from typing import Optional
 from game import Game
 from config_manager import ConfigManager
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -42,27 +50,47 @@ server_configs: dict[int, dict] = {}
 @bot.event
 async def on_ready():
     """Called when the bot is ready."""
-    print(f"{bot.user} has logged in!")
+    logger.info(f"{bot.user} has logged in!")
     
     # Load server configurations
     for guild in bot.guilds:
-        # Store full config (emojis + settings)
-        server_configs[guild.id] = config_manager.load_config(guild.id)
-        print(f"Loaded config for server: {guild.name} ({guild.id})")
+        try:
+            # Store full config (emojis + settings)
+            server_configs[guild.id] = config_manager.load_config(guild.id)
+            logger.info(f"Loaded config for server: {guild.name} ({guild.id})")
+        except Exception as e:
+            logger.error(f"Error loading config for server {guild.id}: {e}", exc_info=True)
     
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
+        logger.info(f"Synced {len(synced)} command(s)")
     except Exception as e:
-        print(f"Failed to sync commands: {e}")
+        logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     """Called when the bot joins a new guild."""
-    # Load configuration for the new guild
-    server_configs[guild.id] = config_manager.load_config(guild.id)
-    print(f"Loaded config for new server: {guild.name} ({guild.id})")
+    try:
+        # Load configuration for the new guild
+        server_configs[guild.id] = config_manager.load_config(guild.id)
+        logger.info(f"Loaded config for new server: {guild.name} ({guild.id})")
+    except Exception as e:
+        logger.error(f"Error loading config for new server {guild.id}: {e}", exc_info=True)
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    """Clean up games when messages are deleted."""
+    message_id = message.id
+    if message_id in active_games:
+        logger.info(f"Cleaning up game for deleted message {message_id}")
+        if message_id in active_games:
+            del active_games[message_id]
+        if message_id in game_players:
+            del game_players[message_id]
+        if message_id in game_owners:
+            del game_owners[message_id]
 
 
 def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None, item_types: dict = None, user_id: Optional[int] = None) -> discord.Embed:
@@ -196,117 +224,196 @@ def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None,
 @bot.tree.command(name="play", description="Start a new game!")
 async def play_command(interaction: discord.Interaction):
     """Handle the /play slash command."""
-    user_id = interaction.user.id
-    guild_id = interaction.guild.id if interaction.guild else None
+    try:
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+        
+        # If user already has an active game, end it first
+        for message_id, players in list(game_players.items()):
+            if user_id in players:
+                # Remove user from that game
+                players.discard(user_id)
+                # If no players left, clean up the game
+                if not players:
+                    if message_id in active_games:
+                        del active_games[message_id]
+                    if message_id in game_owners:
+                        del game_owners[message_id]
+                    del game_players[message_id]
+        
+        # Reset level to 1 for new game
+        user_levels[user_id] = 1
+        
+        # Get server-specific emojis and settings
+        if guild_id and guild_id in server_configs:
+            server_emojis = config_manager.get_emojis(guild_id)
+            item_types = config_manager.get_item_types(guild_id)
+            game_settings = config_manager.get_game_settings(guild_id)
+        else:
+            server_emojis = config_manager.get_default_emojis()
+            item_types = config_manager.get_default_item_types()
+            game_settings = config_manager.get_game_settings(0) if guild_id else config_manager.get_game_settings(0)
+        
+        # Create emoji dict for Game class
+        game_emojis = {
+            "wall": server_emojis["wall"],
+            "obstacle": server_emojis["obstacle"],
+            "empty": server_emojis["empty"],
+            "player": server_emojis["player"],
+            "portal": server_emojis["portal"],
+            "zombie": server_emojis["zombie"],
+        }
+        
+        # Get player lives from server settings
+        player_lives = game_settings.get("player_lives", 3)
+        
+        # Get player emojis for this server
+        player_emojis = config_manager.get_player_emojis(guild_id) if guild_id else config_manager.get_player_emojis(0)
+        
+        # Create new game at level 1 with server-specific emojis and settings
+        # Pass first_player_id to add the creator as the first player
+        game = Game(level=1, player_lives=player_lives, emojis=game_emojis, item_types=item_types, first_player_id=user_id, player_emojis=player_emojis)
+        
+        # Create embed
+        embed = create_game_embed(game, "🎮 Game Started!", emojis=server_emojis, item_types=item_types)
+        
+        # Send message
+        await interaction.response.send_message(embed=embed)
+        message = await interaction.original_response()
+        
+        # Add join reaction first, then movement reactions
+        join_emoji = server_emojis.get("join", "✅")
+        await message.add_reaction(join_emoji)
+        
+        movement_emojis = [server_emojis["up"], server_emojis["down"], server_emojis["left"], server_emojis["right"]]
+        for emoji in movement_emojis:
+            await message.add_reaction(emoji)
+        
+        # Store game state
+        active_games[message.id] = game
+        game_players[message.id] = {user_id}  # Creator is automatically joined
+        game_owners[message.id] = user_id
     
-    # If user already has an active game, end it first
-    for message_id, players in list(game_players.items()):
-        if user_id in players:
-            # Remove user from that game
-            players.discard(user_id)
-            # If no players left, clean up the game
-            if not players:
-                if message_id in active_games:
-                    del active_games[message_id]
-                if message_id in game_owners:
-                    del game_owners[message_id]
-                del game_players[message_id]
-    
-    # Reset level to 1 for new game
-    user_levels[user_id] = 1
-    
-    # Get server-specific emojis and settings
-    if guild_id and guild_id in server_configs:
-        server_emojis = config_manager.get_emojis(guild_id)
-        item_types = config_manager.get_item_types(guild_id)
-        game_settings = config_manager.get_game_settings(guild_id)
-    else:
-        server_emojis = config_manager.get_default_emojis()
-        item_types = config_manager.get_default_item_types()
-        game_settings = config_manager.get_game_settings(0) if guild_id else config_manager.get_game_settings(0)
-    
-    # Create emoji dict for Game class
-    game_emojis = {
-        "wall": server_emojis["wall"],
-        "obstacle": server_emojis["obstacle"],
-        "empty": server_emojis["empty"],
-        "player": server_emojis["player"],
-        "portal": server_emojis["portal"],
-        "zombie": server_emojis["zombie"],
-    }
-    
-    # Get player lives from server settings
-    player_lives = game_settings.get("player_lives", 3)
-    
-    # Get player emojis for this server
-    player_emojis = config_manager.get_player_emojis(guild_id) if guild_id else config_manager.get_player_emojis(0)
-    
-    # Create new game at level 1 with server-specific emojis and settings
-    # Pass first_player_id to add the creator as the first player
-    game = Game(level=1, player_lives=player_lives, emojis=game_emojis, item_types=item_types, first_player_id=user_id, player_emojis=player_emojis)
-    
-    # Create embed
-    embed = create_game_embed(game, "🎮 Game Started!", emojis=server_emojis, item_types=item_types)
-    
-    # Send message
-    await interaction.response.send_message(embed=embed)
-    message = await interaction.original_response()
-    
-    # Add join reaction first, then movement reactions
-    join_emoji = server_emojis.get("join", "✅")
-    await message.add_reaction(join_emoji)
-    
-    movement_emojis = [server_emojis["up"], server_emojis["down"], server_emojis["left"], server_emojis["right"]]
-    for emoji in movement_emojis:
-        await message.add_reaction(emoji)
-    
-    # Store game state
-    active_games[message.id] = game
-    game_players[message.id] = {user_id}  # Creator is automatically joined
-    game_owners[message.id] = user_id
+    except Exception as e:
+        logger.error(f"Error in play_command: {e}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ An error occurred while starting the game. Please try again.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ An error occurred while starting the game. Please try again.",
+                ephemeral=True
+            )
 
 
 @bot.event
 async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
     """Handle reaction additions for joining and movement."""
-    # Ignore bot's own reactions
-    if user.bot:
-        return
+    try:
+        # Ignore bot's own reactions
+        if user.bot:
+            return
+        
+        # Check if this is a game message
+        message_id = reaction.message.id
+        if message_id not in active_games:
+            return
+        
+        game = active_games[message_id]
+        
+        # Validate game still exists
+        if game is None:
+            # Clean up invalid game
+            if message_id in active_games:
+                del active_games[message_id]
+            if message_id in game_players:
+                del game_players[message_id]
+            if message_id in game_owners:
+                del game_owners[message_id]
+            return
+        
+        # Get guild ID for server-specific emojis
+        guild_id = reaction.message.guild.id if reaction.message.guild else None
     
-    # Check if this is a game message
-    message_id = reaction.message.id
-    if message_id not in active_games:
-        return
-    
-    game = active_games[message_id]
-    
-    # Get guild ID for server-specific emojis
-    guild_id = reaction.message.guild.id if reaction.message.guild else None
-    
-    # Get server emojis
-    if guild_id and guild_id in server_configs:
-        server_emojis = config_manager.get_emojis(guild_id)
-        item_types = config_manager.get_item_types(guild_id)
-        emoji_to_direction = config_manager.get_emoji_to_direction(guild_id)
-    else:
-        server_emojis = config_manager.get_default_emojis()
-        item_types = config_manager.get_default_item_types()
-        emoji_to_direction = config_manager.get_emoji_to_direction(0)  # Use defaults
-    
-    # Get UI emojis
-    skull_emoji = server_emojis.get("skull", "💀")
-    join_emoji = server_emojis.get("join", "✅")
-    
-    # Handle both Unicode and custom emojis
-    emoji_str = str(reaction.emoji)
-    
-    # Check if this is a join reaction
-    if emoji_str == join_emoji:
-        # Check if user is already in the game
+        # Get server emojis
+        if guild_id and guild_id in server_configs:
+            server_emojis = config_manager.get_emojis(guild_id)
+            item_types = config_manager.get_item_types(guild_id)
+            emoji_to_direction = config_manager.get_emoji_to_direction(guild_id)
+        else:
+            server_emojis = config_manager.get_default_emojis()
+            item_types = config_manager.get_default_item_types()
+            emoji_to_direction = config_manager.get_emoji_to_direction(0)  # Use defaults
+        
+        # Get UI emojis
+        skull_emoji = server_emojis.get("skull", "💀")
+        join_emoji = server_emojis.get("join", "✅")
+        
+        # Handle both Unicode and custom emojis
+        emoji_str = str(reaction.emoji)
+        
+        # Check if this is a join reaction
+        if emoji_str == join_emoji:
+            # Check if user is already in the game
+            user_in_game = message_id in game_players and user.id in game_players[message_id]
+            
+            if user_in_game:
+                # User already joined, remove reaction
+                try:
+                    await reaction.message.remove_reaction(reaction.emoji, user)
+                except discord.errors.Forbidden:
+                    pass
+                return
+            
+            # Check if game is over
+            if game.game_over:
+                try:
+                    await reaction.message.remove_reaction(reaction.emoji, user)
+                except discord.errors.Forbidden:
+                    pass
+                return
+            
+            # Get player lives from server settings
+            game_settings = config_manager.get_game_settings(guild_id) if guild_id else config_manager.get_game_settings(0)
+            player_lives = game_settings.get("player_lives", 3)
+            
+            # Add player to game
+            if game.add_player(user.id, player_lives):
+                # Add to game_players tracking
+                if message_id not in game_players:
+                    game_players[message_id] = set()
+                game_players[message_id].add(user.id)
+                
+                # Get player emoji
+                player_emoji = game.get_player_emoji(user.id)
+                
+                # Create join message embed
+                embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types)
+                embed.add_field(
+                    name="Player Joined",
+                    value=f"{player_emoji} {user.display_name} joined the game!",
+                    inline=False
+                )
+                await reaction.message.edit(embed=embed)
+                
+                # Remove user's reaction
+                try:
+                    await reaction.message.remove_reaction(reaction.emoji, user)
+                except discord.errors.Forbidden:
+                    pass
+            return
+        
+        # Check if this is a movement reaction
+        if emoji_str not in emoji_to_direction:
+            return  # Not a movement emoji, ignore
+        
+        # Check if user is in the game (must join first)
         user_in_game = message_id in game_players and user.id in game_players[message_id]
         
-        if user_in_game:
-            # User already joined, remove reaction
+        if not user_in_game:
+            # User hasn't joined yet, remove reaction and ignore
             try:
                 await reaction.message.remove_reaction(reaction.emoji, user)
             except discord.errors.Forbidden:
@@ -315,140 +422,122 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
         
         # Check if game is over
         if game.game_over:
+            # Show game over embed
+            embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types)
+            await reaction.message.edit(embed=embed)
+            # Remove user's reaction
             try:
                 await reaction.message.remove_reaction(reaction.emoji, user)
             except discord.errors.Forbidden:
                 pass
             return
         
-        # Get player lives from server settings
-        game_settings = config_manager.get_game_settings(guild_id) if guild_id else config_manager.get_game_settings(0)
-        player_lives = game_settings.get("player_lives", 3)
+        direction = emoji_to_direction[emoji_str]
         
-        # Add player to game
-        if game.add_player(user.id, player_lives):
-            # Add to game_players tracking
-            if message_id not in game_players:
-                game_players[message_id] = set()
-            game_players[message_id].add(user.id)
+        # Try to move the specific player
+        moved = game.move(user.id, direction[0], direction[1])
+        
+        # Check if level completed (player won)
+        if game.is_level_complete() and game.winner is not None:
+            # Winner announcement
+            winner_user_id = game.winner
+            try:
+                winner_user = await bot.fetch_user(winner_user_id)
+                winner_name = winner_user.display_name
+            except:
+                winner_name = f"User {winner_user_id}"
             
-            # Get player emoji
-            player_emoji = game.get_player_emoji(user.id)
+            winner_emoji = game.get_player_emoji(winner_user_id)
+            winner_wins = game.get_player_wins(winner_user_id)
             
-            # Create join message embed
-            embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types)
+            # Show completion message
+            embed = create_game_embed(game, f"🎉 Level {game.level} Complete!", emojis=server_emojis, item_types=item_types)
+            embed.color = discord.Color.gold()
             embed.add_field(
-                name="Player Joined",
-                value=f"{player_emoji} {user.display_name} joined the game!",
+                name="Winner",
+                value=f"{winner_emoji} **{winner_name}** won Level {game.level}! (Total wins: {winner_wins})",
+                inline=False
+            )
+            embed.add_field(
+                name="Next Level",
+                value=f"Advancing to Level {game.level + 1}...",
                 inline=False
             )
             await reaction.message.edit(embed=embed)
+            
+            # Wait a moment before advancing
+            await asyncio.sleep(2)
+            
+            # Create new game for next level, preserving player data
+            new_game = Game.create_next_level(game)
+            active_games[message_id] = new_game
+            
+            # Update embed for new level
+            new_embed = create_game_embed(new_game, f"🎮 Level {new_game.level}", emojis=server_emojis, item_types=item_types)
+            await reaction.message.edit(embed=new_embed)
             
             # Remove user's reaction
             try:
                 await reaction.message.remove_reaction(reaction.emoji, user)
             except discord.errors.Forbidden:
                 pass
-        return
-    
-    # Check if this is a movement reaction
-    if emoji_str not in emoji_to_direction:
-        return  # Not a movement emoji, ignore
-    
-    # Check if user is in the game (must join first)
-    user_in_game = message_id in game_players and user.id in game_players[message_id]
-    
-    if not user_in_game:
-        # User hasn't joined yet, remove reaction and ignore
-        try:
-            await reaction.message.remove_reaction(reaction.emoji, user)
-        except discord.errors.Forbidden:
-            pass
-        return
-    
-    # Check if game is over
-    if game.game_over:
-        # Show game over embed
-        embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types)
-        await reaction.message.edit(embed=embed)
-        # Remove user's reaction
-        try:
-            await reaction.message.remove_reaction(reaction.emoji, user)
-        except discord.errors.Forbidden:
-            pass
-        return
-    
-    direction = emoji_to_direction[emoji_str]
-    
-    # Try to move the specific player
-    moved = game.move(user.id, direction[0], direction[1])
-    
-    # Check if level completed (player won)
-    if game.is_level_complete() and game.winner is not None:
-        # Winner announcement
-        winner_user_id = game.winner
-        try:
-            winner_user = await bot.fetch_user(winner_user_id)
-            winner_name = winner_user.display_name
-        except:
-            winner_name = f"User {winner_user_id}"
+            return
         
-        winner_emoji = game.get_player_emoji(winner_user_id)
-        winner_wins = game.get_player_wins(winner_user_id)
+        # Check if game over (all players lost)
+        if game.game_over:
+            embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types)
+            await reaction.message.edit(embed=embed)
+            # Remove user's reaction
+            try:
+                await reaction.message.remove_reaction(reaction.emoji, user)
+            except discord.errors.Forbidden:
+                pass
+            return
         
-        # Show completion message
-        embed = create_game_embed(game, f"🎉 Level {game.level} Complete!", emojis=server_emojis, item_types=item_types)
-        embed.color = discord.Color.gold()
-        embed.add_field(
-            name="Winner",
-            value=f"{winner_emoji} **{winner_name}** won Level {game.level}! (Total wins: {winner_wins})",
-            inline=False
-        )
-        embed.add_field(
-            name="Next Level",
-            value=f"Advancing to Level {game.level + 1}...",
-            inline=False
-        )
+        # Update embed with current game state
+        embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types)
         await reaction.message.edit(embed=embed)
         
-        # Wait a moment before advancing
-        await asyncio.sleep(2)
-        
-        # Create new game for next level, preserving player data
-        new_game = Game.create_next_level(game)
-        active_games[message_id] = new_game
-        
-        # Update embed for new level
-        new_embed = create_game_embed(new_game, f"🎮 Level {new_game.level}", emojis=server_emojis, item_types=item_types)
-        await reaction.message.edit(embed=new_embed)
-        
-        # Remove user's reaction
+        # Remove user's reaction to allow repeated moves
         try:
             await reaction.message.remove_reaction(reaction.emoji, user)
         except discord.errors.Forbidden:
-            pass
-        return
+            pass  # Ignore if we can't remove the reaction
+        except Exception as e:
+            logger.error(f"Error removing reaction: {e}", exc_info=True)
     
-    # Check if game over (all players lost)
-    if game.game_over:
-        embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types)
-        await reaction.message.edit(embed=embed)
-        # Remove user's reaction
+    except discord.errors.NotFound:
+        # Message was deleted, clean up game
         try:
-            await reaction.message.remove_reaction(reaction.emoji, user)
-        except discord.errors.Forbidden:
-            pass
-        return
-    
-    # Update embed with current game state
-    embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types)
-    await reaction.message.edit(embed=embed)
-    
-    # Remove user's reaction to allow repeated moves
-    try:
-        await reaction.message.remove_reaction(reaction.emoji, user)
+            message_id = reaction.message.id if hasattr(reaction, 'message') and reaction.message else None
+            if message_id:
+                logger.info(f"Game message {message_id} was deleted, cleaning up game")
+                if message_id in active_games:
+                    del active_games[message_id]
+                if message_id in game_players:
+                    del game_players[message_id]
+                if message_id in game_owners:
+                    del game_owners[message_id]
+        except Exception as cleanup_error:
+            logger.error(f"Error during cleanup: {cleanup_error}", exc_info=True)
     except discord.errors.Forbidden:
-        pass  # Ignore if we can't remove the reaction
+        # Bot doesn't have permission
+        try:
+            message_id = reaction.message.id if hasattr(reaction, 'message') and reaction.message else None
+            if message_id:
+                logger.warning(f"Bot lacks permission for message {message_id}")
+        except:
+            pass
+    except Exception as e:
+        try:
+            message_id = reaction.message.id if hasattr(reaction, 'message') and reaction.message else None
+            logger.error(f"Error handling reaction on message {message_id}: {e}", exc_info=True)
+            # Try to clean up if game is in bad state
+            if message_id and message_id in active_games:
+                # Don't delete immediately, but log the error
+                logger.warning(f"Game {message_id} may be in bad state after error")
+        except Exception as log_error:
+            logger.error(f"Error in error handler: {log_error}", exc_info=True)
 
 
 # Configuration UI Components
