@@ -114,6 +114,7 @@ class Game:
         self.player_lives: Dict[int, int] = {}  # user_id -> lives
         self.player_emojis: Dict[int, str] = {}  # user_id -> emoji
         self.player_wins: Dict[int, int] = {}  # user_id -> win count
+        self.player_deaths: Dict[int, int] = {}  # user_id -> death count (for this game)
         self.winner: Optional[int] = None  # user_id of winner
         
         # Generate collectible items (before placing players)
@@ -385,6 +386,10 @@ class Game:
                 
                 # Check if player is out of lives
                 if self.player_lives[user_id] <= 0:
+                    # Track death
+                    if user_id not in self.player_deaths:
+                        self.player_deaths[user_id] = 0
+                    self.player_deaths[user_id] += 1
                     # Remove player from game
                     self.remove_player(user_id)
         
@@ -520,6 +525,10 @@ class Game:
         """Get win count for a player."""
         return self.player_wins.get(user_id, 0)
     
+    def get_player_deaths(self, user_id: int) -> int:
+        """Get death count for a player in this game."""
+        return self.player_deaths.get(user_id, 0)
+    
     @classmethod
     def create_next_level(cls, previous_game: 'Game') -> 'Game':
         """Create a new game instance for the next level, preserving player data.
@@ -542,7 +551,7 @@ class Game:
             player_emojis=previous_game.player_emojis_list.copy()  # Preserve player emoji configuration
         )
         
-        # Preserve player data: emojis, lives, wins
+        # Preserve player data: emojis, lives, wins, deaths
         for user_id in previous_game.players:
             # Preserve emoji assignment
             new_game.player_emojis[user_id] = previous_game.player_emojis[user_id]
@@ -550,6 +559,8 @@ class Game:
             new_game.player_lives[user_id] = previous_game.player_lives[user_id]
             # Preserve wins
             new_game.player_wins[user_id] = previous_game.player_wins[user_id]
+            # Preserve deaths (accumulated across levels in this game session)
+            new_game.player_deaths[user_id] = previous_game.player_deaths.get(user_id, 0)
             # Reset inventory for new level
             new_game.collected_items[user_id] = {item_type: 0 for item_type in new_game.item_types.keys()}
             # Add to players list

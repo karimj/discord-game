@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from typing import Optional
 from game import Game
 from config_manager import ConfigManager
+from score_manager import ScoreManager
 
 # Set up logging
 logging.basicConfig(
@@ -31,6 +32,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Configuration manager
 config_manager = ConfigManager()
 
+# Score manager
+score_manager = ScoreManager()
+
 # Store active games: {message_id: Game}
 active_games: dict[int, Game] = {}
 
@@ -45,6 +49,9 @@ user_levels: dict[int, int] = {}
 
 # Store server configs in memory: {guild_id: emoji_config}
 server_configs: dict[int, dict] = {}
+
+# Store previous death counts per game: {message_id: {user_id: death_count}}
+previous_death_counts: dict[int, dict[int, int]] = {}
 
 
 @bot.event
@@ -91,6 +98,8 @@ async def on_message_delete(message: discord.Message):
             del game_players[message_id]
         if message_id in game_owners:
             del game_owners[message_id]
+        if message_id in previous_death_counts:
+            del previous_death_counts[message_id]
 
 
 def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None, item_types: dict = None, user_id: Optional[int] = None) -> discord.Embed:
@@ -102,9 +111,10 @@ def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None,
     if item_types is None:
         item_types = {}
     
-    # Get UI emojis (heart and skull)
+    # Get UI emojis (heart, skull, and join)
     heart_emoji = emojis.get("heart", "❤️")
     skull_emoji = emojis.get("skull", "💀")
+    join_emoji = emojis.get("join", "✅")
     
     all_emojis = list(emojis.values()) if emojis else []
     all_emojis.extend(item_types.values() if item_types else [])
@@ -216,7 +226,7 @@ def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None,
     if game.game_over:
         embed.set_footer(text="Game Over - Use /play to restart!")
     else:
-        embed.set_footer(text="Click ✅ to join, then use arrows to move!")
+        embed.set_footer(text=f"Click {join_emoji} to join, then use arrows to move!")
     
     return embed
 
@@ -293,6 +303,13 @@ async def play_command(interaction: discord.Interaction):
         active_games[message.id] = game
         game_players[message.id] = {user_id}  # Creator is automatically joined
         game_owners[message.id] = user_id
+        
+        # Initialize death tracking for this game
+        previous_death_counts[message.id] = {}
+        
+        # Track game start
+        if guild_id:
+            score_manager.increment_player_score(guild_id, user_id, "games_played")
     
     except Exception as e:
         logger.error(f"Error in play_command: {e}", exc_info=True)
@@ -434,11 +451,55 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
         
         direction = emoji_to_direction[emoji_str]
         
+        # Track items collected before move
+        items_before = game.get_total_collected(user.id) if user.id in game.player_positions else 0
+        
         # Try to move the specific player
         moved = game.move(user.id, direction[0], direction[1])
         
+        # Track item collection
+        if moved and guild_id:
+            items_after = game.get_total_collected(user.id) if user.id in game.player_positions else 0
+            items_collected = items_after - items_before
+            if items_collected > 0:
+                score_manager.increment_player_score(guild_id, user.id, "items_collected", items_collected)
+        
+        # Track deaths - check if any players died
+        if guild_id:
+            # Initialize previous death counts for this game if not exists
+            if message_id not in previous_death_counts:
+                previous_death_counts[message_id] = {}
+            
+            # Check all players who were in the game (including those who might have been removed)
+            # We check game_players to include all players who joined, not just active ones
+            all_player_ids = set(game_players.get(message_id, set()))
+            all_player_ids.update(game.players)  # Also include current players
+            
+            for player_id in all_player_ids:
+                current_deaths = game.get_player_deaths(player_id)
+                previous_deaths = previous_death_counts[message_id].get(player_id, 0)
+                
+                if current_deaths > previous_deaths:
+                    # Player died - track it
+                    deaths_to_add = current_deaths - previous_deaths
+                    score_manager.increment_player_score(guild_id, player_id, "deaths", deaths_to_add)
+                    previous_death_counts[message_id][player_id] = current_deaths
+        
         # Check if level completed (player won)
         if game.is_level_complete() and game.winner is not None:
+            # Track level completion scores
+            if guild_id:
+                # Update highest level for all players who participated
+                for player_id in game.players:
+                    current_highest = score_manager.get_player_stats(guild_id, player_id).get("highest_level", 0)
+                    if game.level > current_highest:
+                        score_manager.update_player_score(guild_id, player_id, "highest_level", game.level)
+                    # Increment levels completed
+                    score_manager.increment_player_score(guild_id, player_id, "levels_completed")
+                
+                # Increment wins for winner
+                score_manager.increment_player_score(guild_id, game.winner, "wins")
+            
             # Winner announcement
             winner_user_id = game.winner
             try:
@@ -472,6 +533,10 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
             new_game = Game.create_next_level(game)
             active_games[message_id] = new_game
             
+            # Preserve previous death counts for the new game
+            if message_id in previous_death_counts:
+                previous_death_counts[message_id] = {pid: game.get_player_deaths(pid) for pid in game.players}
+            
             # Update embed for new level
             new_embed = create_game_embed(new_game, f"🎮 Level {new_game.level}", emojis=server_emojis, item_types=item_types)
             await reaction.message.edit(embed=new_embed)
@@ -485,6 +550,15 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
         
         # Check if game over (all players lost)
         if game.game_over:
+            # Track game completion for all players
+            if guild_id:
+                for player_id in list(game_players.get(message_id, set())):
+                    score_manager.increment_player_score(guild_id, player_id, "games_completed")
+            
+            # Clean up death tracking for this game
+            if message_id in previous_death_counts:
+                del previous_death_counts[message_id]
+            
             embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types)
             await reaction.message.edit(embed=embed)
             # Remove user's reaction
@@ -962,6 +1036,267 @@ async def configure_command(interaction: discord.Interaction):
     view = CategoryView(config_manager, guild_id, emojis)
     
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# Leaderboard UI Components
+class LeaderboardView(discord.ui.View):
+    """View with buttons for selecting leaderboard stat type."""
+    
+    STAT_DISPLAY_NAMES = {
+        "wins": "Wins",
+        "highest_level": "Highest Level",
+        "items_collected": "Items Collected",
+        "games_played": "Games Played",
+        "levels_completed": "Levels Completed",
+        "games_completed": "Games Completed",
+        "deaths": "Deaths"
+    }
+    
+    def __init__(self, score_manager: ScoreManager, guild_id: int, current_stat: str = "wins"):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.score_manager = score_manager
+        self.guild_id = guild_id
+        self.current_stat = current_stat
+    
+    def format_stat_value(self, stat_name: str, value: int) -> str:
+        """Format a stat value for display."""
+        if stat_name == "highest_level":
+            return f"Level {value}"
+        elif stat_name == "items_collected":
+            return f"{value:,} items"
+        elif stat_name == "deaths":
+            return f"{value:,} deaths"
+        else:
+            return f"{value:,}"
+    
+    async def create_leaderboard_embed(self, stat_name: str, user_id: int, client: discord.Client = None, guild: discord.Guild = None) -> discord.Embed:
+        """Create a leaderboard embed for the given stat."""
+        # Get top 10 players
+        leaderboard = self.score_manager.get_leaderboard(self.guild_id, stat_name, limit=10)
+        
+        # Get current player's rank and stats
+        player_rank = self.score_manager.get_player_rank(self.guild_id, user_id, stat_name)
+        player_stats = self.score_manager.get_player_stats(self.guild_id, user_id)
+        player_value = player_stats.get(stat_name, 0)
+        
+        # Check if player is in top 10
+        player_in_top_10 = any(uid == user_id for uid, _ in leaderboard)
+        
+        # Create embed
+        stat_display = self.STAT_DISPLAY_NAMES.get(stat_name, stat_name.replace("_", " ").title())
+        embed = discord.Embed(
+            title=f"Leaderboard: {stat_display}",
+            color=discord.Color.gold()
+        )
+        
+        # Build leaderboard text
+        leaderboard_text = ""
+        
+        for rank, (uid, value) in enumerate(leaderboard, start=1):
+            try:
+                # Try to get user from guild first (faster)
+                member = None
+                if guild:
+                    member = guild.get_member(uid)
+                
+                if member:
+                    # Use mention for guild members
+                    username = member.mention
+                else:
+                    # Use user ID format for mentions (Discord will resolve it)
+                    username = f"<@{uid}>"
+            except:
+                # Fallback to user ID format
+                username = f"<@{uid}>"
+            
+            # Use number for rank
+            rank_display = f"{rank}."
+            
+            # Format: rank. @mention - value
+            leaderboard_text += f"{rank_display} {username} - {self.format_stat_value(stat_name, value)}\n"
+        
+        # Add current player if not in top 10
+        if not player_in_top_10 and player_rank is not None:
+            leaderboard_text += "\n" + "─" * 30 + "\n"
+            try:
+                # Try to get user from guild first (faster)
+                member = None
+                if guild:
+                    member = guild.get_member(user_id)
+                
+                if member:
+                    # Use mention for guild members
+                    username = member.mention
+                else:
+                    # Use user ID format for mentions (Discord will resolve it)
+                    username = f"<@{user_id}>"
+            except:
+                # Fallback to user ID format
+                username = f"<@{user_id}>"
+            leaderboard_text += f"{player_rank}. {username} - {self.format_stat_value(stat_name, player_value)}\n"
+        
+        if leaderboard_text:
+            embed.description = leaderboard_text
+        else:
+            embed.description = "No players have stats yet. Play a game to get on the leaderboard!"
+        
+        embed.set_footer(text="Click a button below to view different stats")
+        
+        return embed
+    
+    @discord.ui.button(label="Wins", style=discord.ButtonStyle.success, row=0)
+    async def wins_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show wins leaderboard."""
+        self.current_stat = "wins"
+        embed = await self.create_leaderboard_embed("wins", interaction.user.id, interaction.client, interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Highest Level", style=discord.ButtonStyle.secondary, row=0)
+    async def highest_level_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show highest level leaderboard."""
+        self.current_stat = "highest_level"
+        embed = await self.create_leaderboard_embed("highest_level", interaction.user.id, interaction.client, interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Items", style=discord.ButtonStyle.primary, row=0)
+    async def items_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show items collected leaderboard."""
+        self.current_stat = "items_collected"
+        embed = await self.create_leaderboard_embed("items_collected", interaction.user.id, interaction.client, interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Games Played", style=discord.ButtonStyle.secondary, row=1)
+    async def games_played_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show games played leaderboard."""
+        self.current_stat = "games_played"
+        embed = await self.create_leaderboard_embed("games_played", interaction.user.id, interaction.client, interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Levels Completed", style=discord.ButtonStyle.secondary, row=1)
+    async def levels_completed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show levels completed leaderboard."""
+        self.current_stat = "levels_completed"
+        embed = await self.create_leaderboard_embed("levels_completed", interaction.user.id, interaction.client, interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Games Completed", style=discord.ButtonStyle.secondary, row=1)
+    async def games_completed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show games completed leaderboard."""
+        self.current_stat = "games_completed"
+        embed = await self.create_leaderboard_embed("games_completed", interaction.user.id, interaction.client, interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Deaths", style=discord.ButtonStyle.danger, row=2)
+    async def deaths_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show deaths leaderboard."""
+        self.current_stat = "deaths"
+        embed = await self.create_leaderboard_embed("deaths", interaction.user.id, interaction.client, interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.tree.command(name="leaderboard", description="View the leaderboard for various stats")
+async def leaderboard_command(interaction: discord.Interaction):
+    """Handle the /leaderboard slash command."""
+    try:
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not guild_id:
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True
+            )
+            return
+        
+        # Create leaderboard view with default stat (wins)
+        view = LeaderboardView(score_manager, guild_id, current_stat="wins")
+        embed = await view.create_leaderboard_embed("wins", interaction.user.id, interaction.client, interaction.guild)
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
+    except Exception as e:
+        logger.error(f"Error in leaderboard_command: {e}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ An error occurred while loading the leaderboard. Please try again.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ An error occurred while loading the leaderboard. Please try again.",
+                ephemeral=True
+            )
+
+
+@bot.tree.command(name="stats", description="View your stats or another player's stats")
+async def stats_command(interaction: discord.Interaction, user: Optional[discord.User] = None):
+    """Handle the /stats slash command."""
+    try:
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not guild_id:
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True
+            )
+            return
+        
+        # Use provided user or default to command user
+        target_user = user if user else interaction.user
+        user_id = target_user.id
+        
+        # Get player stats
+        stats = score_manager.get_player_stats(guild_id, user_id)
+        
+        # Calculate win rate
+        games_played = stats.get("games_played", 0)
+        wins = stats.get("wins", 0)
+        win_rate = (wins / games_played * 100) if games_played > 0 else 0.0
+        
+        # Create embed
+        embed = discord.Embed(
+            title=f"Stats for {target_user.display_name}",
+            color=discord.Color.blue()
+        )
+        
+        # Build stats text with name and value on same line
+        stats_text = ""
+        stats_text += f"Wins: {stats.get('wins', 0):,}\n"
+        stats_text += f"Highest Level: Level {stats.get('highest_level', 0)}\n"
+        stats_text += f"Items Collected: {stats.get('items_collected', 0):,}\n"
+        stats_text += f"Games Played: {stats.get('games_played', 0):,}\n"
+        stats_text += f"Levels Completed: {stats.get('levels_completed', 0):,}\n"
+        stats_text += f"Games Completed: {stats.get('games_completed', 0):,}\n"
+        stats_text += f"Deaths: {stats.get('deaths', 0):,}\n"
+        stats_text += f"Win Rate: {win_rate:.1f}%\n" if games_played > 0 else "Win Rate: N/A\n"
+        
+        embed.description = stats_text
+        
+        # Add rank information
+        rank_text = ""
+        for stat_name, display_name in LeaderboardView.STAT_DISPLAY_NAMES.items():
+            rank = score_manager.get_player_rank(guild_id, user_id, stat_name)
+            if rank is not None:
+                rank_text += f"**{display_name}**: #{rank}\n"
+        
+        if rank_text:
+            embed.add_field(
+                name="Ranks",
+                value=rank_text,
+                inline=False
+            )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    except Exception as e:
+        logger.error(f"Error in stats_command: {e}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ An error occurred while loading stats. Please try again.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ An error occurred while loading stats. Please try again.",
+                ephemeral=True
+            )
 
 
 if __name__ == "__main__":
