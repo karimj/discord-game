@@ -1,11 +1,20 @@
 {
   "1234899606475899046": {
-    "wins": 2,
-    "highest_level": 2,
-    "items_collected": 10,
-    "games_played": 3,
-    "levels_completed": 2,
+    "wins": 7,
+    "highest_level": 3,
+    "items_collected": 29,
+    "games_played": 7,
+    "levels_completed": 7,
     "games_completed": 1,
-    "deaths": 1
+    "deaths": 1,
+    "xp": 109,
+    "achievements_unlocked": [
+      "first_item",
+      "collect_10",
+      "first_win",
+      "level_3",
+      "complete_5_levels",
+      "play_5_games"
+    ]
   }
 }

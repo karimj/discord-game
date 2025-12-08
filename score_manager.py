@@ -2,6 +2,7 @@
 
 import os
 import json
+import math
 from typing import Dict, Optional, List, Tuple
 
 
@@ -50,6 +51,15 @@ class ScoreManager:
                     for stat_name in self.STAT_NAMES:
                         if stat_name not in stats:
                             stats[stat_name] = 0
+                    # Ensure XP exists
+                    if "xp" not in stats:
+                        stats["xp"] = 0
+                    # Ensure achievements_unlocked exists as list
+                    if "achievements_unlocked" not in stats:
+                        stats["achievements_unlocked"] = []
+                    elif not isinstance(stats["achievements_unlocked"], list):
+                        # Convert old format to list if needed
+                        stats["achievements_unlocked"] = []
                 return scores
             except (json.JSONDecodeError, IOError) as e:
                 print(f"Error loading scores for guild {guild_id}: {e}")
@@ -84,11 +94,19 @@ class ScoreManager:
         
         if user_id_str not in scores:
             scores[user_id_str] = {stat: 0 for stat in self.STAT_NAMES}
+            scores[user_id_str]["xp"] = 0
+            scores[user_id_str]["achievements_unlocked"] = []
         else:
             # Ensure all stats exist
             for stat_name in self.STAT_NAMES:
                 if stat_name not in scores[user_id_str]:
                     scores[user_id_str][stat_name] = 0
+            if "xp" not in scores[user_id_str]:
+                scores[user_id_str]["xp"] = 0
+            if "achievements_unlocked" not in scores[user_id_str]:
+                scores[user_id_str]["achievements_unlocked"] = []
+            elif not isinstance(scores[user_id_str]["achievements_unlocked"], list):
+                scores[user_id_str]["achievements_unlocked"] = []
         
         return scores[user_id_str]
     
@@ -234,4 +252,137 @@ class ScoreManager:
                 return rank
         
         return None
+    
+    def award_xp(self, guild_id: int, user_id: int, amount: int) -> bool:
+        """Award XP to a player and check for level ups.
+        
+        Args:
+            guild_id: Discord guild ID
+            user_id: Discord user ID
+            amount: Amount of XP to award
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        scores = self.load_scores(guild_id)
+        user_id_str = str(user_id)
+        
+        # Ensure player exists
+        if user_id_str not in scores:
+            scores[user_id_str] = {stat: 0 for stat in self.STAT_NAMES}
+            scores[user_id_str]["xp"] = 0
+            scores[user_id_str]["achievements_unlocked"] = []
+        else:
+            # Ensure XP exists
+            if "xp" not in scores[user_id_str]:
+                scores[user_id_str]["xp"] = 0
+        
+        # Award XP
+        old_level = self.get_player_level(guild_id, user_id)
+        scores[user_id_str]["xp"] = scores[user_id_str].get("xp", 0) + amount
+        new_level = self.get_player_level(guild_id, user_id)
+        
+        # Save scores
+        success = self.save_scores(guild_id, scores)
+        
+        # Return True if level up occurred
+        return success
+    
+    def get_player_level(self, guild_id: int, user_id: int) -> int:
+        """Calculate player level from XP.
+        
+        Formula: level = int(sqrt(xp / 100)) + 1
+        
+        Args:
+            guild_id: Discord guild ID
+            user_id: Discord user ID
+            
+        Returns:
+            Player level (minimum 1)
+        """
+        stats = self.get_player_stats(guild_id, user_id)
+        xp = stats.get("xp", 0)
+        if xp <= 0:
+            return 1
+        level = int(math.sqrt(xp / 100)) + 1
+        return max(1, level)
+    
+    def get_achievements(self, guild_id: int, user_id: int) -> List[str]:
+        """Get list of unlocked achievement IDs for a player.
+        
+        Args:
+            guild_id: Discord guild ID
+            user_id: Discord user ID
+            
+        Returns:
+            List of achievement IDs
+        """
+        scores = self.load_scores(guild_id)
+        user_id_str = str(user_id)
+        
+        if user_id_str in scores:
+            achievements = scores[user_id_str].get("achievements_unlocked", [])
+            if isinstance(achievements, list):
+                return achievements.copy()
+            return []
+        return []
+    
+    def unlock_achievement(self, guild_id: int, user_id: int, achievement_id: str, xp_reward: int = 0) -> bool:
+        """Unlock an achievement for a player and award bonus XP.
+        
+        Args:
+            guild_id: Discord guild ID
+            user_id: Discord user ID
+            achievement_id: ID of the achievement to unlock
+            xp_reward: XP reward for unlocking this achievement
+            
+        Returns:
+            True if achievement was newly unlocked, False if already unlocked
+        """
+        scores = self.load_scores(guild_id)
+        user_id_str = str(user_id)
+        
+        # Ensure player exists
+        if user_id_str not in scores:
+            scores[user_id_str] = {stat: 0 for stat in self.STAT_NAMES}
+            scores[user_id_str]["xp"] = 0
+            scores[user_id_str]["achievements_unlocked"] = []
+        else:
+            if "achievements_unlocked" not in scores[user_id_str]:
+                scores[user_id_str]["achievements_unlocked"] = []
+            elif not isinstance(scores[user_id_str]["achievements_unlocked"], list):
+                scores[user_id_str]["achievements_unlocked"] = []
+        
+        # Check if already unlocked
+        if achievement_id in scores[user_id_str]["achievements_unlocked"]:
+            return False
+        
+        # Unlock achievement
+        scores[user_id_str]["achievements_unlocked"].append(achievement_id)
+        
+        # Award XP reward
+        if xp_reward > 0:
+            if "xp" not in scores[user_id_str]:
+                scores[user_id_str]["xp"] = 0
+            scores[user_id_str]["xp"] += xp_reward
+        
+        return self.save_scores(guild_id, scores)
+    
+    def check_achievements(self, guild_id: int, user_id: int, stats: Dict[str, int]) -> List[Tuple[str, int]]:
+        """Check if any achievements should be unlocked based on current stats.
+        
+        This method should be called with an achievements module that defines achievement checks.
+        Returns list of (achievement_id, xp_reward) tuples for newly unlocked achievements.
+        
+        Args:
+            guild_id: Discord guild ID
+            user_id: Discord user ID
+            stats: Current player stats dictionary
+            
+        Returns:
+            List of (achievement_id, xp_reward) tuples for newly unlocked achievements
+        """
+        # This will be called from bot.py with the achievements module
+        # For now, return empty list - actual checking happens in bot.py
+        return []
 

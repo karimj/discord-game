@@ -14,6 +14,10 @@ A Discord bot that allows multiple players to play a text-based movement game. E
 - 🎁 Item collection - Collect items and reach the portal to advance levels
 - 🧟 Zombie enemies - Avoid zombies that move toward you
 - 💾 Persistent configuration - Server settings saved and loaded on restart
+- ⭐ XP & Level System - Earn XP and level up through gameplay
+- 🏆 Achievements - Unlock achievements and earn bonus XP
+- 🛒 Shop System - Purchase power-ups with earned XP
+- ⚡ Power-ups - Use shields, extra hearts, and speed boosts during games
 
 ## Setup Instructions
 
@@ -75,7 +79,7 @@ You should see a message like:
 ```
 BotName#1234 has logged in!
 Loaded config for server: Your Server Name (123456789)
-Synced 2 command(s)
+Synced 7 command(s)
 ```
 
 Note: The bot will automatically load server configurations on startup.
@@ -206,6 +210,113 @@ For production servers, you'll want to run the bot as a background service so it
 7. Each click moves you one space in that direction
 8. The game field updates automatically after each move
 9. You have limited lives - avoid zombies or you'll lose a life!
+10. Use power-ups (🛡️💚⚡) by clicking their reaction emojis during gameplay
+
+## Commands
+
+### Game Commands
+
+- `/play` - Start a new game
+- `/stats [user]` - View your stats or another player's stats (shows XP, level, achievements, and more)
+- `/leaderboard` - View leaderboards for various statistics
+
+### Progression Commands
+
+- `/shop` - Browse and purchase power-ups with XP
+- `/inventory` - View your purchased power-ups
+- `/achievements` - View all achievements and your progress
+
+### Admin Commands
+
+- `/configure` - Configure emojis and game settings (Admin only)
+
+## XP & Level System
+
+Earn XP through gameplay to level up and unlock achievements!
+
+### Earning XP
+
+- **Movement**: 1 XP per move
+- **Item Collection**: 5 XP per item collected
+- **Level Completion**: 50 + (Level × 10) XP
+  - Level 1: 60 XP
+  - Level 2: 70 XP
+  - Level 5: 100 XP
+  - Level 10: 150 XP
+- **Achievements**: Variable XP rewards (see Achievements section)
+
+### Level Calculation
+
+Your level is calculated from your total XP using the formula:
+```
+Level = int(sqrt(XP / 100)) + 1
+```
+
+Examples:
+- 0 XP = Level 1
+- 100 XP = Level 2
+- 400 XP = Level 3
+- 1,600 XP = Level 5
+- 10,000 XP = Level 11
+
+## Achievements
+
+Unlock achievements by completing various challenges! Each achievement awards bonus XP when unlocked.
+
+### Collection Achievements
+- **First Collection** (50 XP) - Collect your first item
+- **Item Collector** (100 XP) - Collect 10 items
+- **Item Hoarder** (250 XP) - Collect 50 items
+- **Master Collector** (500 XP) - Collect 100 items
+
+### Level Progression Achievements
+- **Level Explorer** (150 XP) - Reach level 3
+- **Level Master** (200 XP) - Reach level 5
+- **Level Champion** (400 XP) - Reach level 10
+
+### Survival Achievements
+- **Zombie Survivor** (150 XP) - Complete a game without dying
+- **Perfect Game** (300 XP) - Complete 3 games without dying
+
+### Completion Achievements
+- **First Victory** (100 XP) - Win your first level
+- **Victory Master** (300 XP) - Win 10 levels
+- **Level Completer** (200 XP) - Complete 5 levels
+- **Level Expert** (400 XP) - Complete 20 levels
+
+### Activity Achievements
+- **Dedicated Player** (100 XP) - Play 5 games
+- **Veteran Player** (300 XP) - Play 20 games
+
+## Shop & Power-ups
+
+Purchase power-ups from the shop using XP earned through gameplay. Power-ups can be activated during games by clicking their reaction emojis.
+
+### Available Power-ups
+
+- **🛡️ Shield** (500 XP)
+  - Blocks one zombie hit
+  - Zombie stays alive - you must move away!
+  - Max stack: 10
+
+- **💚 Extra Heart** (750 XP)
+  - Adds +1 life to your current lives
+  - Can exceed maximum lives
+  - Max stack: 5
+
+- **⚡ Speed Boost** (1,000 XP)
+  - Move twice per reaction for 5 moves
+  - Great for escaping zombies quickly
+  - Max stack: 5
+
+### Using Power-ups
+
+1. Purchase power-ups from `/shop` using your XP
+2. Start or join a game - your power-ups are automatically loaded
+3. During gameplay, click the power-up reaction emoji (🛡️, 💚, or ⚡) to activate it
+4. Power-ups are consumed when used (one-time use per purchase)
+
+**Note**: Power-ups persist across game sessions but are consumed when activated during gameplay.
 
 ## Configuration
 
@@ -282,11 +393,15 @@ The `config.py` file contains default values used when server-specific configs d
 ## Technical Details
 
 - Built with Python 3.8+ and discord.py
-- Uses slash commands (`/play`, `/configure`) for game control
-- Uses reaction events for movement input
+- Uses slash commands (`/play`, `/configure`, `/shop`, `/inventory`, `/achievements`, `/stats`, `/leaderboard`) for game control
+- Uses reaction events for movement input and power-up activation
 - Game state stored in memory (resets when bot restarts)
 - Server configurations stored in JSON files (`configs/{server_id}.json`) and persist across restarts
+- Player scores and XP stored in JSON files (`scores/{server_id}.json`) and persist across restarts
+- Power-up inventories stored in JSON files (`inventories/{server_id}.json`) and persist across restarts
 - Each player can have one active game at a time
 - Supports multiple levels with increasing difficulty
 - Zombies use weighted pathfinding to move toward the player
+- XP and achievement system tracks player progression
+- Shop system allows purchasing power-ups with earned XP
 

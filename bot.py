@@ -11,6 +11,8 @@ from typing import Optional
 from game import Game
 from config_manager import ConfigManager
 from score_manager import ScoreManager
+from achievements import check_achievements, get_achievement_info
+from shop import ShopManager
 
 # Set up logging
 logging.basicConfig(
@@ -34,6 +36,9 @@ config_manager = ConfigManager()
 
 # Score manager
 score_manager = ScoreManager()
+
+# Shop manager
+shop_manager = ShopManager()
 
 # Store active games: {message_id: Game}
 active_games: dict[int, Game] = {}
@@ -102,7 +107,7 @@ async def on_message_delete(message: discord.Message):
             del previous_death_counts[message_id]
 
 
-def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None, item_types: dict = None, user_id: Optional[int] = None) -> discord.Embed:
+def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None, item_types: dict = None, user_id: Optional[int] = None, guild_id: Optional[int] = None) -> discord.Embed:
     """Create a game embed with field, inventory, and level info for all players."""
     # Check if using custom emojis (they don't render in code blocks)
     field_render = game.render()
@@ -188,13 +193,56 @@ def create_game_embed(game: Game, title: str = "🎮 Game", emojis: dict = None,
             progress = f"{total_collected}/{game.required_items_count}"
             wins = game.get_player_wins(player_id)
             win_text = f", {wins} win{'s' if wins != 1 else ''}" if wins > 0 else ""
-            players_text += f"{player_emoji} Player: {lives_display} {lives} lives, {progress} items{win_text}\n"
+            
+            # Add XP and level info if guild_id is provided
+            xp_text = ""
+            if guild_id:
+                stats = score_manager.get_player_stats(guild_id, player_id)
+                xp = stats.get("xp", 0)
+                level = score_manager.get_player_level(guild_id, player_id)
+                xp_text = f", Level {level} ({xp} XP)"
+            
+            players_text += f"{player_emoji} Player: {lives_display} {lives} lives, {progress} items{win_text}{xp_text}\n"
         
         embed.add_field(
             name="Players",
             value=players_text.strip(),
             inline=False
         )
+        
+        # Add power-ups info
+        if guild_id:
+            powerups_text = ""
+            for player_id in game.players:
+                player_emoji = game.get_player_emoji(player_id)
+                available_powerups = game.get_available_powerups(player_id)
+                active_powerups = game.get_active_powerups(player_id)
+                
+                powerup_info = []
+                if available_powerups:
+                    for powerup_type, count in available_powerups.items():
+                        powerup_emojis = {"shield": "🛡️", "extra_heart": "💚", "speed_boost": "⚡"}
+                        emoji = powerup_emojis.get(powerup_type, "❓")
+                        powerup_info.append(f"{emoji}x{count}")
+                
+                if active_powerups:
+                    active_info = []
+                    if active_powerups.get("shield"):
+                        active_info.append("🛡️")
+                    if active_powerups.get("speed_boost", 0) > 0:
+                        active_info.append(f"⚡({active_powerups['speed_boost']})")
+                    if active_info:
+                        powerup_info.append(f"[Active: {''.join(active_info)}]")
+                
+                if powerup_info:
+                    powerups_text += f"{player_emoji} {' '.join(powerup_info)}\n"
+            
+            if powerups_text:
+                embed.add_field(
+                    name="Power-ups",
+                    value=powerups_text.strip(),
+                    inline=False
+                )
     
     # Add inventories for all players
     inventories_text = ""
@@ -284,8 +332,13 @@ async def play_command(interaction: discord.Interaction):
         # Pass first_player_id to add the creator as the first player
         game = Game(level=1, player_lives=player_lives, emojis=game_emojis, item_types=item_types, first_player_id=user_id, player_emojis=player_emojis)
         
+        # Load power-ups from shop inventory
+        if guild_id:
+            powerup_inventory = shop_manager.get_player_inventory(guild_id, user_id)
+            game.load_powerups(user_id, powerup_inventory)
+        
         # Create embed
-        embed = create_game_embed(game, "🎮 Game Started!", emojis=server_emojis, item_types=item_types)
+        embed = create_game_embed(game, "🎮 Game Started!", emojis=server_emojis, item_types=item_types, guild_id=guild_id)
         
         # Send message
         await interaction.response.send_message(embed=embed)
@@ -298,6 +351,22 @@ async def play_command(interaction: discord.Interaction):
         movement_emojis = [server_emojis["up"], server_emojis["down"], server_emojis["left"], server_emojis["right"]]
         for emoji in movement_emojis:
             await message.add_reaction(emoji)
+        
+        # Add power-up reactions if player has any available
+        if guild_id:
+            available_powerups = game.get_available_powerups(user_id)
+            if available_powerups:
+                powerup_emojis = {
+                    "shield": "🛡️",
+                    "extra_heart": "💚",
+                    "speed_boost": "⚡"
+                }
+                for powerup_type in available_powerups.keys():
+                    if powerup_type in powerup_emojis:
+                        try:
+                            await message.add_reaction(powerup_emojis[powerup_type])
+                        except:
+                            pass
         
         # Store game state
         active_games[message.id] = game
@@ -398,6 +467,11 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
             
             # Add player to game
             if game.add_player(user.id, player_lives):
+                # Load power-ups from shop inventory
+                if guild_id:
+                    powerup_inventory = shop_manager.get_player_inventory(guild_id, user.id)
+                    game.load_powerups(user.id, powerup_inventory)
+                
                 # Add to game_players tracking
                 if message_id not in game_players:
                     game_players[message_id] = set()
@@ -407,7 +481,7 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
                 player_emoji = game.get_player_emoji(user.id)
                 
                 # Create join message embed
-                embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types)
+                embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types, guild_id=guild_id)
                 embed.add_field(
                     name="Player Joined",
                     value=f"{player_emoji} {user.display_name} joined the game!",
@@ -415,7 +489,81 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
                 )
                 await reaction.message.edit(embed=embed)
                 
+                # Add power-up reactions if player has any available
+                if guild_id:
+                    available_powerups = game.get_available_powerups(user.id)
+                    if available_powerups:
+                        # Add reactions for available power-ups
+                        powerup_emojis = {
+                            "shield": "🛡️",
+                            "extra_heart": "💚",
+                            "speed_boost": "⚡"
+                        }
+                        for powerup_type in available_powerups.keys():
+                            if powerup_type in powerup_emojis:
+                                try:
+                                    await reaction.message.add_reaction(powerup_emojis[powerup_type])
+                                except:
+                                    pass
+                
                 # Remove user's reaction
+                try:
+                    await reaction.message.remove_reaction(reaction.emoji, user)
+                except discord.errors.Forbidden:
+                    pass
+            return
+        
+        # Check if this is a power-up activation reaction
+        powerup_emojis = {
+            "🛡️": "shield",
+            "💚": "extra_heart",
+            "⚡": "speed_boost"
+        }
+        
+        if emoji_str in powerup_emojis:
+            # User is trying to activate a power-up
+            powerup_type = powerup_emojis[emoji_str]
+            
+            # Check if user is in the game
+            user_in_game = message_id in game_players and user.id in game_players[message_id]
+            
+            if not user_in_game:
+                try:
+                    await reaction.message.remove_reaction(reaction.emoji, user)
+                except discord.errors.Forbidden:
+                    pass
+                return
+            
+            # Check if game is over
+            if game.game_over:
+                try:
+                    await reaction.message.remove_reaction(reaction.emoji, user)
+                except discord.errors.Forbidden:
+                    pass
+                return
+            
+            # Try to use the power-up
+            if game.use_powerup(user.id, powerup_type):
+                # Power-up activated successfully
+                # Consume from shop inventory
+                if guild_id:
+                    shop_manager.use_item(guild_id, user.id, powerup_type)
+                
+                # Update embed
+                embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types, guild_id=guild_id)
+                powerup_names = {
+                    "shield": "Shield",
+                    "extra_heart": "Extra Heart",
+                    "speed_boost": "Speed Boost"
+                }
+                embed.add_field(
+                    name="Power-up Activated",
+                    value=f"{user.display_name} used {powerup_names.get(powerup_type, powerup_type)}!",
+                    inline=False
+                )
+                await reaction.message.edit(embed=embed)
+            else:
+                # Power-up not available
                 try:
                     await reaction.message.remove_reaction(reaction.emoji, user)
                 except discord.errors.Forbidden:
@@ -440,7 +588,7 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
         # Check if game is over
         if game.game_over:
             # Show game over embed
-            embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types)
+            embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types, guild_id=guild_id)
             await reaction.message.edit(embed=embed)
             # Remove user's reaction
             try:
@@ -457,12 +605,29 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
         # Try to move the specific player
         moved = game.move(user.id, direction[0], direction[1])
         
-        # Track item collection
+        # Award XP and track item collection
         if moved and guild_id:
+            # Award XP for move (1 XP per move)
+            score_manager.award_xp(guild_id, user.id, 1)
+            
             items_after = game.get_total_collected(user.id) if user.id in game.player_positions else 0
             items_collected = items_after - items_before
             if items_collected > 0:
                 score_manager.increment_player_score(guild_id, user.id, "items_collected", items_collected)
+                # Award XP for item collection (5 XP per item)
+                score_manager.award_xp(guild_id, user.id, items_collected * 5)
+                
+                # Check achievements after item collection
+                stats = score_manager.get_player_stats(guild_id, user.id)
+                unlocked_achievements = score_manager.get_achievements(guild_id, user.id)
+                newly_unlocked = check_achievements(stats, unlocked_achievements)
+                
+                for achievement_id, xp_reward in newly_unlocked:
+                    score_manager.unlock_achievement(guild_id, user.id, achievement_id, xp_reward)
+                    achievement_info = get_achievement_info(achievement_id)
+                    if achievement_info:
+                        # Award achievement XP
+                        score_manager.award_xp(guild_id, user.id, xp_reward)
         
         # Track deaths - check if any players died
         if guild_id:
@@ -496,6 +661,20 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
                         score_manager.update_player_score(guild_id, player_id, "highest_level", game.level)
                     # Increment levels completed
                     score_manager.increment_player_score(guild_id, player_id, "levels_completed")
+                    
+                    # Award bonus XP for level completion (50 + level * 10)
+                    level_completion_xp = 50 + (game.level * 10)
+                    score_manager.award_xp(guild_id, player_id, level_completion_xp)
+                    
+                    # Check achievements after level completion
+                    stats = score_manager.get_player_stats(guild_id, player_id)
+                    unlocked_achievements = score_manager.get_achievements(guild_id, player_id)
+                    newly_unlocked = check_achievements(stats, unlocked_achievements)
+                    
+                    for achievement_id, xp_reward in newly_unlocked:
+                        score_manager.unlock_achievement(guild_id, player_id, achievement_id, xp_reward)
+                        # Award achievement XP
+                        score_manager.award_xp(guild_id, player_id, xp_reward)
                 
                 # Increment wins for winner
                 score_manager.increment_player_score(guild_id, game.winner, "wins")
@@ -512,7 +691,7 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
             winner_wins = game.get_player_wins(winner_user_id)
             
             # Show completion message
-            embed = create_game_embed(game, f"🎉 Level {game.level} Complete!", emojis=server_emojis, item_types=item_types)
+            embed = create_game_embed(game, f"🎉 Level {game.level} Complete!", emojis=server_emojis, item_types=item_types, guild_id=guild_id)
             embed.color = discord.Color.gold()
             embed.add_field(
                 name="Winner",
@@ -531,6 +710,13 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
             
             # Create new game for next level, preserving player data
             new_game = Game.create_next_level(game)
+            
+            # Reload power-ups from shop inventory for all players
+            if guild_id:
+                for player_id in new_game.players:
+                    powerup_inventory = shop_manager.get_player_inventory(guild_id, player_id)
+                    new_game.load_powerups(player_id, powerup_inventory)
+            
             active_games[message_id] = new_game
             
             # Preserve previous death counts for the new game
@@ -538,7 +724,7 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
                 previous_death_counts[message_id] = {pid: game.get_player_deaths(pid) for pid in game.players}
             
             # Update embed for new level
-            new_embed = create_game_embed(new_game, f"🎮 Level {new_game.level}", emojis=server_emojis, item_types=item_types)
+            new_embed = create_game_embed(new_game, f"🎮 Level {new_game.level}", emojis=server_emojis, item_types=item_types, guild_id=guild_id)
             await reaction.message.edit(embed=new_embed)
             
             # Remove user's reaction
@@ -559,7 +745,7 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
             if message_id in previous_death_counts:
                 del previous_death_counts[message_id]
             
-            embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types)
+            embed = create_game_embed(game, f"{skull_emoji} Game Over", emojis=server_emojis, item_types=item_types, guild_id=guild_id)
             await reaction.message.edit(embed=embed)
             # Remove user's reaction
             try:
@@ -569,7 +755,7 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
             return
         
         # Update embed with current game state
-        embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types)
+        embed = create_game_embed(game, "🎮 Game", emojis=server_emojis, item_types=item_types, guild_id=guild_id)
         await reaction.message.edit(embed=embed)
         
         # Remove user's reaction to allow repeated moves
@@ -1226,6 +1412,272 @@ async def leaderboard_command(interaction: discord.Interaction):
             )
 
 
+@bot.tree.command(name="shop", description="Browse and purchase power-ups with XP")
+async def shop_command(interaction: discord.Interaction):
+    """Handle the /shop slash command."""
+    try:
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not guild_id:
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True
+            )
+            return
+        
+        user_id = interaction.user.id
+        stats = score_manager.get_player_stats(guild_id, user_id)
+        player_xp = stats.get("xp", 0)
+        
+        shop_items = shop_manager.get_shop_items()
+        
+        # Create embed
+        embed = discord.Embed(
+            title="🛒 Shop",
+            description=f"Your XP: **{player_xp:,}**\n\nPurchase power-ups to use during games!",
+            color=discord.Color.gold()
+        )
+        
+        # Add shop items
+        for item_id, item_data in shop_items.items():
+            cost = item_data["cost"]
+            emoji = item_data["emoji"]
+            name = item_data["name"]
+            description = item_data["description"]
+            max_stack = item_data.get("max_stack", 999)
+            
+            # Check if player can afford it
+            can_afford = player_xp >= cost
+            afford_text = "✅" if can_afford else "❌"
+            
+            embed.add_field(
+                name=f"{afford_text} {emoji} {name} - {cost} XP",
+                value=f"{description}\nMax: {max_stack}",
+                inline=False
+            )
+        
+        embed.set_footer(text="Click a button below to purchase an item")
+        
+        # Create view with purchase buttons
+        view = ShopView(shop_manager, score_manager, guild_id, user_id)
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
+    except Exception as e:
+        logger.error(f"Error in shop_command: {e}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ An error occurred while loading the shop. Please try again.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ An error occurred while loading the shop. Please try again.",
+                ephemeral=True
+            )
+
+
+class ShopView(discord.ui.View):
+    """View with buttons for purchasing shop items."""
+    
+    def __init__(self, shop_manager: ShopManager, score_manager: ScoreManager, guild_id: int, user_id: int):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.shop_manager = shop_manager
+        self.score_manager = score_manager
+        self.guild_id = guild_id
+        self.user_id = user_id
+        
+        # Add buttons for each shop item
+        shop_items = shop_manager.get_shop_items()
+        for idx, (item_id, item_data) in enumerate(shop_items.items()):
+            if idx >= 25:  # Discord limit
+                break
+            button = discord.ui.Button(
+                label=f"{item_data['emoji']} {item_data['name']} ({item_data['cost']} XP)",
+                style=discord.ButtonStyle.primary,
+                row=idx // 5
+            )
+            
+            # Create callback for this item
+            async def button_callback(interaction: discord.Interaction, item_id=item_id):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message(
+                        "❌ This shop is for a different user.",
+                        ephemeral=True
+                    )
+                    return
+                
+                # Get current XP
+                stats = self.score_manager.get_player_stats(self.guild_id, self.user_id)
+                player_xp = stats.get("xp", 0)
+                
+                # Attempt purchase
+                success, message = self.shop_manager.purchase_item(
+                    self.guild_id, self.user_id, item_id, player_xp
+                )
+                
+                if success:
+                    # Deduct XP
+                    item_data = shop_items[item_id]
+                    self.score_manager.award_xp(self.guild_id, self.user_id, -item_data["cost"])
+                    
+                    await interaction.response.send_message(
+                        f"✅ {message}",
+                        ephemeral=True
+                    )
+                    
+                    # Update the shop embed
+                    stats = self.score_manager.get_player_stats(self.guild_id, self.user_id)
+                    player_xp = stats.get("xp", 0)
+                    
+                    embed = discord.Embed(
+                        title="🛒 Shop",
+                        description=f"Your XP: **{player_xp:,}**\n\nPurchase power-ups to use during games!",
+                        color=discord.Color.gold()
+                    )
+                    
+                    for item_id2, item_data2 in shop_items.items():
+                        cost = item_data2["cost"]
+                        emoji = item_data2["emoji"]
+                        name = item_data2["name"]
+                        description = item_data2["description"]
+                        max_stack = item_data2.get("max_stack", 999)
+                        
+                        can_afford = player_xp >= cost
+                        afford_text = "✅" if can_afford else "❌"
+                        
+                        embed.add_field(
+                            name=f"{afford_text} {emoji} {name} - {cost} XP",
+                            value=f"{description}\nMax: {max_stack}",
+                            inline=False
+                        )
+                    
+                    embed.set_footer(text="Click a button below to purchase an item")
+                    await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
+                else:
+                    await interaction.response.send_message(
+                        f"❌ {message}",
+                        ephemeral=True
+                    )
+            
+            button.callback = button_callback
+            self.add_item(button)
+
+
+@bot.tree.command(name="inventory", description="View your purchased power-ups")
+async def inventory_command(interaction: discord.Interaction):
+    """Handle the /inventory slash command."""
+    try:
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not guild_id:
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True
+            )
+            return
+        
+        user_id = interaction.user.id
+        inventory = shop_manager.get_player_inventory(guild_id, user_id)
+        shop_items = shop_manager.get_shop_items()
+        
+        # Create embed
+        embed = discord.Embed(
+            title="🎒 Inventory",
+            description="Your purchased power-ups:",
+            color=discord.Color.blue()
+        )
+        
+        if inventory:
+            inventory_text = ""
+            for item_id, count in inventory.items():
+                if item_id in shop_items:
+                    item_data = shop_items[item_id]
+                    emoji = item_data["emoji"]
+                    name = item_data["name"]
+                    description = item_data["description"]
+                    inventory_text += f"{emoji} **{name}** x{count}\n{description}\n\n"
+            embed.description = inventory_text.strip()
+        else:
+            embed.description = "Your inventory is empty. Visit `/shop` to purchase power-ups!"
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    except Exception as e:
+        logger.error(f"Error in inventory_command: {e}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ An error occurred while loading your inventory. Please try again.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ An error occurred while loading your inventory. Please try again.",
+                ephemeral=True
+            )
+
+
+@bot.tree.command(name="achievements", description="View your achievements and progress")
+async def achievements_command(interaction: discord.Interaction):
+    """Handle the /achievements slash command."""
+    try:
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not guild_id:
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True
+            )
+            return
+        
+        user_id = interaction.user.id
+        stats = score_manager.get_player_stats(guild_id, user_id)
+        unlocked_achievements = score_manager.get_achievements(guild_id, user_id)
+        
+        from achievements import ACHIEVEMENTS, get_achievements_by_category
+        
+        # Create embed
+        embed = discord.Embed(
+            title="🏆 Achievements",
+            description=f"Unlocked: {len(unlocked_achievements)}/{len(ACHIEVEMENTS)}",
+            color=discord.Color.gold()
+        )
+        
+        # Group by category
+        categories = get_achievements_by_category()
+        
+        for category, achievement_ids in categories.items():
+            category_text = ""
+            for achievement_id in achievement_ids:
+                achievement_data = ACHIEVEMENTS[achievement_id]
+                is_unlocked = achievement_id in unlocked_achievements
+                status = "✅" if is_unlocked else "❌"
+                name = achievement_data["name"]
+                description = achievement_data["description"]
+                xp_reward = achievement_data["xp_reward"]
+                
+                category_text += f"{status} **{name}** - {description} (+{xp_reward} XP)\n"
+            
+            if category_text:
+                embed.add_field(
+                    name=category,
+                    value=category_text.strip(),
+                    inline=False
+                )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    except Exception as e:
+        logger.error(f"Error in achievements_command: {e}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ An error occurred while loading achievements. Please try again.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ An error occurred while loading achievements. Please try again.",
+                ephemeral=True
+            )
+
+
 @bot.tree.command(name="stats", description="View your stats or another player's stats")
 async def stats_command(interaction: discord.Interaction, user: Optional[discord.User] = None):
     """Handle the /stats slash command."""
@@ -1256,8 +1708,17 @@ async def stats_command(interaction: discord.Interaction, user: Optional[discord
             color=discord.Color.blue()
         )
         
+        # Get XP and level
+        xp = stats.get("xp", 0)
+        level = score_manager.get_player_level(guild_id, user_id)
+        unlocked_achievements = score_manager.get_achievements(guild_id, user_id)
+        from achievements import ACHIEVEMENTS
+        total_achievements = len(ACHIEVEMENTS)
+        
         # Build stats text with name and value on same line
         stats_text = ""
+        stats_text += f"**Level**: {level} ({xp:,} XP)\n"
+        stats_text += f"**Achievements**: {len(unlocked_achievements)}/{total_achievements}\n\n"
         stats_text += f"Wins: {stats.get('wins', 0):,}\n"
         stats_text += f"Highest Level: Level {stats.get('highest_level', 0)}\n"
         stats_text += f"Items Collected: {stats.get('items_collected', 0):,}\n"

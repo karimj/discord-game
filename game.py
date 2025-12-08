@@ -130,6 +130,13 @@ class Game:
         self.zombies: List[Tuple[int, int]] = []
         self.zombie_move_counter = 0
         
+        # Power-up tracking
+        self.player_powerups: Dict[int, Dict[str, int]] = {}  # user_id -> {powerup_type: count}
+        self.active_powerups: Dict[int, Dict[str, any]] = {}  # user_id -> {powerup_type: data}
+        # active_powerups structure:
+        # - "shield": True/False (if active)
+        # - "speed_boost": int (moves remaining)
+        
         # Game over flag
         self.game_over = False
         
@@ -378,6 +385,13 @@ class Game:
         # Check each player for zombie collisions
         for user_id, player_pos in list(self.player_positions.items()):
             if player_pos in self.zombies:
+                # Check if shield is active
+                if self._check_shield(user_id):
+                    # Shield blocks the hit - zombie stays alive, player must move away
+                    self._deactivate_shield(user_id)
+                    # Don't remove zombies - player needs to move away to avoid getting hit again
+                    continue
+                
                 # Collision detected - reduce lives
                 self.player_lives[user_id] -= 1
                 
@@ -428,10 +442,19 @@ class Game:
         if self.game_over or user_id not in self.player_positions:
             return False
         
-        if self.can_move(user_id, dx, dy):
+        # Check if speed boost is active - if so, move twice
+        speed_boost_active = self._is_speed_boost_active(user_id)
+        moves_to_make = 2 if speed_boost_active else 1
+        
+        moved_any = False
+        for move_num in range(moves_to_make):
+            if not self.can_move(user_id, dx, dy):
+                break  # Can't move further
+            
             player_pos = self.player_positions[user_id]
             new_pos = (player_pos[0] + dx, player_pos[1] + dy)
             self.player_positions[user_id] = new_pos
+            moved_any = True
             
             # Check if player collected an item
             if new_pos in self.items:
@@ -451,6 +474,12 @@ class Game:
                     if user_id not in self.player_wins:
                         self.player_wins[user_id] = 0
                     self.player_wins[user_id] += 1
+                break  # Level complete, stop moving
+        
+        if moved_any:
+            # Apply speed boost move reduction (only once per reaction)
+            if speed_boost_active:
+                self._apply_speed_boost_move(user_id)
             
             # Check for zombie collisions after player move
             self._check_zombie_collision()
@@ -551,7 +580,7 @@ class Game:
             player_emojis=previous_game.player_emojis_list.copy()  # Preserve player emoji configuration
         )
         
-        # Preserve player data: emojis, lives, wins, deaths
+        # Preserve player data: emojis, lives, wins, deaths, power-ups
         for user_id in previous_game.players:
             # Preserve emoji assignment
             new_game.player_emojis[user_id] = previous_game.player_emojis[user_id]
@@ -561,6 +590,9 @@ class Game:
             new_game.player_wins[user_id] = previous_game.player_wins[user_id]
             # Preserve deaths (accumulated across levels in this game session)
             new_game.player_deaths[user_id] = previous_game.player_deaths.get(user_id, 0)
+            # Preserve power-ups (but reset active power-ups)
+            new_game.player_powerups[user_id] = previous_game.player_powerups.get(user_id, {}).copy()
+            new_game.active_powerups[user_id] = {}
             # Reset inventory for new level
             new_game.collected_items[user_id] = {item_type: 0 for item_type in new_game.item_types.keys()}
             # Add to players list
@@ -614,6 +646,141 @@ class Game:
         if user_id not in self.collected_items:
             return 0
         return sum(self.collected_items[user_id].values())
+    
+    def load_powerups(self, user_id: int, powerup_inventory: Dict[str, int]) -> None:
+        """Load power-ups from shop inventory into game.
+        
+        Args:
+            user_id: Discord user ID
+            powerup_inventory: Dictionary mapping powerup_type to count
+        """
+        self.player_powerups[user_id] = powerup_inventory.copy()
+        # Initialize active power-ups if not exists
+        if user_id not in self.active_powerups:
+            self.active_powerups[user_id] = {}
+    
+    def use_powerup(self, user_id: int, powerup_type: str) -> bool:
+        """Activate a power-up for a player.
+        
+        Args:
+            user_id: Discord user ID
+            powerup_type: Type of power-up to use ("shield", "extra_heart", "speed_boost")
+            
+        Returns:
+            True if power-up was activated, False otherwise
+        """
+        if user_id not in self.player_powerups:
+            return False
+        
+        available_count = self.player_powerups[user_id].get(powerup_type, 0)
+        if available_count <= 0:
+            return False
+        
+        # Initialize active power-ups if needed
+        if user_id not in self.active_powerups:
+            self.active_powerups[user_id] = {}
+        
+        if powerup_type == "shield":
+            # Activate shield
+            self.active_powerups[user_id]["shield"] = True
+            # Consume one shield
+            self.player_powerups[user_id][powerup_type] -= 1
+            if self.player_powerups[user_id][powerup_type] == 0:
+                del self.player_powerups[user_id][powerup_type]
+            return True
+        
+        elif powerup_type == "extra_heart":
+            # Add one life
+            if user_id in self.player_lives:
+                self.player_lives[user_id] += 1
+            # Consume one extra heart
+            self.player_powerups[user_id][powerup_type] -= 1
+            if self.player_powerups[user_id][powerup_type] == 0:
+                del self.player_powerups[user_id][powerup_type]
+            return True
+        
+        elif powerup_type == "speed_boost":
+            # Activate speed boost (5 moves)
+            self.active_powerups[user_id]["speed_boost"] = 5
+            # Consume one speed boost
+            self.player_powerups[user_id][powerup_type] -= 1
+            if self.player_powerups[user_id][powerup_type] == 0:
+                del self.player_powerups[user_id][powerup_type]
+            return True
+        
+        return False
+    
+    def _check_shield(self, user_id: int) -> bool:
+        """Check if player has an active shield.
+        
+        Args:
+            user_id: Discord user ID
+            
+        Returns:
+            True if shield is active, False otherwise
+        """
+        if user_id not in self.active_powerups:
+            return False
+        return self.active_powerups[user_id].get("shield", False)
+    
+    def _deactivate_shield(self, user_id: int) -> None:
+        """Deactivate shield after it blocks a hit.
+        
+        Args:
+            user_id: Discord user ID
+        """
+        if user_id in self.active_powerups:
+            self.active_powerups[user_id]["shield"] = False
+    
+    def _is_speed_boost_active(self, user_id: int) -> bool:
+        """Check if speed boost is active for a player.
+        
+        Args:
+            user_id: Discord user ID
+            
+        Returns:
+            True if speed boost is active, False otherwise
+        """
+        if user_id not in self.active_powerups:
+            return False
+        moves_left = self.active_powerups[user_id].get("speed_boost", 0)
+        return moves_left > 0
+    
+    def _apply_speed_boost_move(self, user_id: int) -> None:
+        """Reduce speed boost moves remaining after a move.
+        
+        Args:
+            user_id: Discord user ID
+        """
+        if user_id not in self.active_powerups:
+            return
+        
+        if "speed_boost" in self.active_powerups[user_id]:
+            self.active_powerups[user_id]["speed_boost"] -= 1
+            if self.active_powerups[user_id]["speed_boost"] <= 0:
+                del self.active_powerups[user_id]["speed_boost"]
+    
+    def get_available_powerups(self, user_id: int) -> Dict[str, int]:
+        """Get available power-ups count for a player.
+        
+        Args:
+            user_id: Discord user ID
+            
+        Returns:
+            Dictionary mapping powerup_type to count
+        """
+        return self.player_powerups.get(user_id, {}).copy()
+    
+    def get_active_powerups(self, user_id: int) -> Dict[str, any]:
+        """Get active power-ups for a player.
+        
+        Args:
+            user_id: Discord user ID
+            
+        Returns:
+            Dictionary of active power-ups
+        """
+        return self.active_powerups.get(user_id, {}).copy()
     
     def render(self) -> str:
         """Render the game field as a string using emojis."""
